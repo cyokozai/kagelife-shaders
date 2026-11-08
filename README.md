@@ -12,7 +12,7 @@ presets/
     one_slit.kage   単スリットを通る波（cnzn0「one-slit」のアレンジ）
     NOTICE          原作の MIT の著作権表示と許諾文
 go.mod
-shaders_test.go     presets/*/*.kage をすべてコンパイルする検査
+shaders_test.go     presets/*/*.kage をすべて解析・型検査する検査
 ```
 
 ## kagelife で動かす
@@ -42,7 +42,7 @@ kagelife（`dev`）の `internal/uniform/uniform.go` が毎フレーム渡す次
 
 `shaders_test.go` が、すべての `presets/*/*.kage` について次を確かめます。CI（`.github/workflows/ci.yml`）も同じものを Linux で走らせます。
 
-- `ebiten.NewShader` でコンパイルできる
+- `ebiten.NewShader` で Kage として解析・型検査できる（GLSL・MSL・HLSL への変換と GPU ドライバでのコンパイルは最初の描画のときに行われるので、この検査では確かめていません）
 - 先頭 5 行以内に `//kage:unit pixels` がある
 - 宣言した Uniform が上の 6 つの名前と型に収まる
 
