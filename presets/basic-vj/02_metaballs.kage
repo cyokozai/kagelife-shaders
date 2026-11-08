@@ -1,0 +1,82 @@
+//kage:unit pixels
+
+// 02_metaballs.kage — メタボール。中低域のグルーヴ向け。
+//
+// 設計:
+//   - 深い紫の背景に、溶けた液体のような玉を BallCount 個浮かべる。玉はそれぞれ別の周期の
+//     リサージュ曲線でゆっくり漂い、近づくとくっついて 1 つの塊になる（場の和が 1 を越えた所が中身）。
+//   - 色はマゼンタからオレンジ（溶岩ランプ）。縁は明るい輪郭線、中は場の強さで濃淡を付ける。
+//   - Beat: 拍頭で玉が膨らみ（半径 × (1 + SwellAmount)）、少し上へ跳ねてから戻る。包絡は exp(-SwellDecay*Beat)。
+//
+// 1 画素あたりのループ: BallCount 回（6 回）。
+package main
+
+var Time float
+var Beat float
+var Resolution vec2
+
+// ---- 調整用の値 ------------------------------------------------------------
+
+// 玉の数（ループの回数）。
+const BallCount = 6
+
+// 玉の半径の基準（画面の高さに対する割合）。
+const BallRadius = 0.1
+
+// 拍頭の膨らみ（半径の増分の割合）。上げると拍頭の画面全体の明るさの差が増える。
+const SwellAmount = 0.22
+
+// 膨らみが引く速さ。
+const SwellDecay = 6.0
+
+// 拍頭の跳ね上がりの高さ（画面の高さに対する割合）。
+const BounceHeight = 0.03
+
+// 漂う速さ。
+const DriftSpeed = 0.35
+
+// ---------------------------------------------------------------------------
+
+func hash11(n float) float {
+	return fract(sin(n*127.1+3.3) * 43758.5453)
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
+	uv.y = -uv.y
+	aspect := Resolution.x / Resolution.y
+
+	env := exp(-SwellDecay * Beat)
+	r := BallRadius * (1.0 + SwellAmount*env)
+
+	field := 0.0
+	for i := 0; i < BallCount; i++ {
+		fi := float(i)
+		fx := 0.3 + 0.5*hash11(fi*3.1)
+		fy := 0.25 + 0.5*hash11(fi*5.7+1.0)
+		ph := hash11(fi*9.2+2.0) * 6.2832
+		c := vec2(0.36*aspect*sin(Time*DriftSpeed*fx+ph), 0.3*cos(Time*DriftSpeed*fy+ph*1.7))
+		// 跳ね方を玉ごとに少しずらす。
+		c.y += BounceHeight * env * (0.6 + 0.4*hash11(fi+7.0))
+		ri := r * (0.75 + 0.5*hash11(fi*2.3+4.0))
+		d := uv - c
+		field += ri * ri / (dot(d, d) + 1e-5)
+	}
+
+	// 背景: 深い紫、下を少し明るく。
+	bg := mix(vec3(0.09, 0.02, 0.13), vec3(0.03, 0.0, 0.06), clamp(uv.y+0.5, 0.0, 1.0))
+	// 玉の周りのにじみ。
+	bg += vec3(0.35, 0.05, 0.25) * 0.12 * smoothstep(0.2, 1.0, field)
+
+	// 中身の色: 縁はマゼンタ、場の強いところはオレンジから黄。
+	inside := smoothstep(0.98, 1.02, field)
+	t := clamp((field-1.0)/3.0, 0.0, 1.0)
+	body := mix(vec3(0.85, 0.12, 0.45), vec3(1.0, 0.55, 0.12), smoothstep(0.0, 0.6, t))
+	body = mix(body, vec3(1.0, 0.85, 0.45), smoothstep(0.6, 1.0, t))
+	// 縁の輪郭線。
+	rim := exp(-abs(field-1.0) * 14.0)
+	c := mix(bg, body*0.85, inside)
+	c += vec3(1.0, 0.6, 0.85) * rim * 0.35
+
+	return vec4(c, 1.0)
+}
