@@ -40,13 +40,14 @@ var Resolution vec2
 const FlashAmount = 0.22
 const FlashDecay = 12.0
 
-// 色収差の幅（画面の高さに対する割合）の常時の値と拍頭の増分。
+// 色収差の幅（画面の高さに対する割合）の常時の値と拍頭の増分。線の太さ（高さの約 0.03）より小さくして、
+// 線の芯を白く残す（越えると赤・緑・青の 3 本の縞に分かれ、画面全体が縞模様になる）。
 const ChromaBase = 0.002
-const ChromaKick = 0.024
+const ChromaKick = 0.009
 
 // グリッチの起きる割合の常時の値と拍頭の増分、引く速さ。
 const GlitchBase = 0.03
-const GlitchKick = 0.45
+const GlitchKick = 0.32
 const GlitchDecay = 6.0
 
 // 行のずれの大きさ（画面の高さに対する割合）の常時の値と拍頭の増分。
