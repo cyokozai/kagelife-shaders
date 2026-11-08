@@ -3,12 +3,19 @@
 // 02_metaballs.kage — メタボール。中低域のグルーヴ向け。
 //
 // 設計:
-//   - 深い紫の背景に、溶けた液体のような玉を BallCount 個浮かべる。玉はそれぞれ別の周期の
-//     リサージュ曲線でゆっくり漂い、近づくとくっついて 1 つの塊になる（場の和が 1 を越えた所が中身）。
-//   - 色はマゼンタからオレンジ（溶岩ランプ）。縁は明るい輪郭線、中は場の強さで濃淡を付ける。
-//   - Beat: 拍頭で玉が膨らみ（半径 × (1 + SwellAmount)）、少し上へ跳ねてから戻る。包絡は exp(-SwellDecay*Beat)。
+//   - 墨色に近い深い青緑の背景に、溶けた液体の玉を BallCount 個浮かべる。玉はそれぞれ別の周期の
+//     リサージュ曲線で漂い、近づくとくっついて 1 つの塊になる（場の和が 1 を越えた所が中身）。
+//   - 玉ごとに色を持たせ（マゼンタ・朱・琥珀・ホットピンク）、場の重みで混ぜる。くっついた所では
+//     色が溶け合う。中心ほど白に近い黄に寄せて、溶岩ランプの熱い芯にする。
+//   - 場の勾配から面の向きを作り、左上からの光で陰影と鏡面の光沢を付ける（濡れた液体に見せる）。
+//   - Beat（1 拍の中の位相）で 3 つを動かす。
+//       跳ね: 玉の高さ = BounceHeight * sin(π*Beat)。拍頭で一番下（着地）、拍の中ほどで一番上。
+//             Beat が 1 から 0 に戻っても位置は飛ばない。
+//       着地のつぶれ: 拍頭で横に広がり縦に縮む（SquashAmount、面積はほぼ保つ）。exp(-SquashDecay*Beat) で戻る。
+//       膨らみと縁の光: 拍頭で半径 × (1 + SwellAmount)、縁の光も強まる。exp(-SwellDecay*Beat) で引く。
+//     画面全体が明るくなるのは膨らみと縁の光による拍頭の 1 回だけ。Random は使わない（毎フレームの明滅なし）。
 //
-// 1 画素あたりのループ: BallCount 回（6 回）。
+// 1 画素あたりのループ: BallCount 回（6 回）。ループは 1 つだけ。
 package main
 
 var Time float
@@ -21,19 +28,32 @@ var Resolution vec2
 const BallCount = 6
 
 // 玉の半径の基準（画面の高さに対する割合）。
-const BallRadius = 0.1
+const BallRadius = 0.105
 
 // 拍頭の膨らみ（半径の増分の割合）。上げると拍頭の画面全体の明るさの差が増える。
-const SwellAmount = 0.22
+const SwellAmount = 0.2
 
-// 膨らみが引く速さ。
-const SwellDecay = 6.0
+// 膨らみと縁の光が引く速さ。
+const SwellDecay = 5.0
 
-// 拍頭の跳ね上がりの高さ（画面の高さに対する割合）。
-const BounceHeight = 0.03
+// 拍頭の着地のつぶれ（横に広がる割合）。
+const SquashAmount = 0.22
+
+// つぶれが戻る速さ。膨らみより少し速く戻すと、弾む感じが出る。
+const SquashDecay = 7.0
+
+// 跳ねの高さ（画面の高さに対する割合）。拍の中ほどで最大。
+const BounceHeight = 0.045
 
 // 漂う速さ。
-const DriftSpeed = 0.35
+const DriftSpeed = 0.33
+
+// 陰影の強さ。大きいほど縁が丸く盛り上がって見える。
+const NormalScale = 0.045
+
+// 縁の光の常時の強さと、拍頭に足す強さ。
+const RimBase = 0.25
+const RimBeat = 0.55
 
 // ---------------------------------------------------------------------------
 
@@ -41,42 +61,84 @@ func hash11(n float) float {
 	return fract(sin(n*127.1+3.3) * 43758.5453)
 }
 
+// ballColor は玉ごとの色。k は 0〜1 のハッシュ値。マゼンタ → 朱 → 琥珀 → ホットピンク の順に並べた。
+func ballColor(k float) vec3 {
+	if k < 0.25 {
+		return vec3(0.9, 0.08, 0.5)
+	}
+	if k < 0.5 {
+		return vec3(1.0, 0.3, 0.1)
+	}
+	if k < 0.75 {
+		return vec3(1.0, 0.62, 0.12)
+	}
+	return vec3(1.0, 0.25, 0.6)
+}
+
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
-	uv.y = -uv.y
+	uv.y = -uv.y // 上を正にする。
 	aspect := Resolution.x / Resolution.y
 
-	env := exp(-SwellDecay * Beat)
-	r := BallRadius * (1.0 + SwellAmount*env)
+	swell := exp(-SwellDecay * Beat)
+	sq := SquashAmount * exp(-SquashDecay*Beat)
+	sx := 1.0 / (1.0 + sq) // 横は広がる（距離を縮めて測る）。
+	sy := 1.0 + sq         // 縦は縮む。
+	hop := sin(3.14159265 * Beat)
+	r := BallRadius * (1.0 + SwellAmount*swell)
 
 	field := 0.0
+	grad := vec2(0.0)
+	tint := vec3(0.0)
 	for i := 0; i < BallCount; i++ {
 		fi := float(i)
 		fx := 0.3 + 0.5*hash11(fi*3.1)
 		fy := 0.25 + 0.5*hash11(fi*5.7+1.0)
 		ph := hash11(fi*9.2+2.0) * 6.2832
-		c := vec2(0.36*aspect*sin(Time*DriftSpeed*fx+ph), 0.3*cos(Time*DriftSpeed*fy+ph*1.7))
-		// 跳ね方を玉ごとに少しずらす。
-		c.y += BounceHeight * env * (0.6 + 0.4*hash11(fi+7.0))
+		c := vec2(0.38*aspect*sin(Time*DriftSpeed*fx+ph), 0.27*cos(Time*DriftSpeed*fy+ph*1.7))
+		// 跳ねの高さを玉ごとに少しずらす。
+		c.y += BounceHeight * hop * (0.6 + 0.4*hash11(fi+7.0))
 		ri := r * (0.75 + 0.5*hash11(fi*2.3+4.0))
 		d := uv - c
-		field += ri * ri / (dot(d, d) + 1e-5)
+		q := d.x*d.x*sx*sx + d.y*d.y*sy*sy + 1e-5
+		f := ri * ri / q
+		field += f
+		// f の勾配: -2 f/q * (sx² d.x, sy² d.y)
+		grad += -2.0 * f / q * vec2(sx*sx*d.x, sy*sy*d.y)
+		tint += f * ballColor(hash11(fi*4.7+11.0))
 	}
 
-	// 背景: 深い紫、下を少し明るく。
-	bg := mix(vec3(0.09, 0.02, 0.13), vec3(0.03, 0.0, 0.06), clamp(uv.y+0.5, 0.0, 1.0))
-	// 玉の周りのにじみ。
-	bg += vec3(0.35, 0.05, 0.25) * 0.12 * smoothstep(0.2, 1.0, field)
+	// 背景: 墨色の青緑。上を少し明るく、中央に向けて沈める。
+	bg := mix(vec3(0.0, 0.02, 0.03), vec3(0.01, 0.07, 0.09), clamp(uv.y+0.5, 0.0, 1.0))
+	bg *= 1.0 - 0.35*clamp(length(uv*vec2(0.8, 1.0)), 0.0, 1.0)
+	// 玉の周りのにじみ（熱の照り返し）。
+	halo := smoothstep(0.25, 1.0, field)
+	bg += vec3(0.45, 0.08, 0.2) * 0.18 * halo
 
-	// 中身の色: 縁はマゼンタ、場の強いところはオレンジから黄。
-	inside := smoothstep(0.98, 1.02, field)
-	t := clamp((field-1.0)/3.0, 0.0, 1.0)
-	body := mix(vec3(0.85, 0.12, 0.45), vec3(1.0, 0.55, 0.12), smoothstep(0.0, 0.6, t))
-	body = mix(body, vec3(1.0, 0.85, 0.45), smoothstep(0.6, 1.0, t))
-	// 縁の輪郭線。
-	rim := exp(-abs(field-1.0) * 14.0)
-	c := mix(bg, body*0.85, inside)
-	c += vec3(1.0, 0.6, 0.85) * rim * 0.35
+	// 中身の色: 玉ごとの色を場の重みで混ぜ、芯ほど白に近い黄へ。
+	base := tint / max(field, 1e-4)
+	core := clamp((field-1.0)/4.0, 0.0, 1.0)
+	body := mix(base, vec3(1.0, 0.86, 0.5), smoothstep(0.35, 1.0, core))
 
-	return vec4(c, 1.0)
+	// 面の向き: 場の対数の勾配（中心ほど平ら、縁ほど傾く）。
+	g := grad / max(field, 1e-4) * NormalScale
+	n := normalize(vec3(-g, 1.0))
+	l := normalize(vec3(-0.5, 0.6, 1.0))
+	h := normalize(l + vec3(0.0, 0.0, 1.0))
+	diff := 0.45 + 0.55*max(dot(n, l), 0.0)
+	spec := pow(max(dot(n, h), 0.0), 36.0)
+
+	// 縁の切り替えは画素の幅で滑らかにする（場の勾配で 1 画素ぶんの場の変化を見積もる）。
+	px := length(grad) / Resolution.y
+	aa := max(px*1.5, 0.01)
+	inside := smoothstep(1.0-aa, 1.0+aa, field)
+
+	shaded := body*diff + vec3(1.0, 0.95, 0.9)*spec*0.6
+	col := mix(bg, shaded, inside)
+
+	// 縁の光（拍頭で強まる）。
+	rim := exp(-abs(field-1.0) * 10.0)
+	col += mix(base, vec3(1.0, 0.7, 0.9), 0.5) * rim * (RimBase + RimBeat*swell)
+
+	return vec4(col, 1.0)
 }
