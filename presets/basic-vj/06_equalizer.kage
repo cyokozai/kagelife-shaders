@@ -90,9 +90,9 @@ func peakHeight(bar, seed float) float {
 	coarse := mix(hash21(vec2(gi, seed)), hash21(vec2(gi+1.0, seed)), gu)
 	fine := hash21(vec2(bar+57.0, seed*1.37))
 	n := 0.7*coarse + 0.3*fine
-	// 左（低音）ほど高い。
-	tilt := 1.0 - 0.4*bar/BarCount
-	return clamp((0.35+0.65*n)*tilt, 0.12, 1.0)
+	// 左（低音）ほど高い。左寄りの山は赤の段まで届くことがある。
+	tilt := 1.12 - 0.45*bar/BarCount
+	return clamp((0.25+0.85*n)*tilt, 0.12, 1.0)
 }
 
 // wobble は Time に対してなめらかな -1〜1 の揺れ。
