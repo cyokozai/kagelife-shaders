@@ -1,0 +1,154 @@
+//kage:unit pixels
+
+// 09_glitch_strobe.kage — グリッチストロボ。ドロップ用のいちばん激しい絵。
+//
+// 設計:
+//   - 下地は黒に白の線画: 中心から広がる角の丸い四角の輪、横に流れるデータの帯、中央の十字。
+//   - その上に次のグリッチをかける。
+//       * 行のグリッチ: 横の帯ごとに横へずらし、ずれた帯は横方向に粗く量子化する（画素が崩れた見た目）。
+//       * ブロックのグリッチ: 四角いブロックをずらし、線を酸っぱい黄緑（AcidR/G/B）に染め、暗い黄緑で塗る。
+//       * 色収差: 赤と青を左右逆にずらす（白い線の縁に赤と水色が出る）。
+//       * 走査線: ScanlinePx 画素ごとに 1 行を暗くする。
+//   - 配色: 黒・白・黄緑（AcidR/G/B）と、色収差で出る赤と水色。
+//   - Beat: 拍頭（Beat=0）で (1) 色収差の幅、(2) グリッチの起こる割合、(3) 行のずれの大きさ、(4) 輪の寄り、
+//     (5) 白への明滅 が上がり、exp(-k*Beat) で引く。拍の後半はほぼ静かな線画に戻るので、拍頭の崩れが目立つ。
+//
+// 光の明滅への配慮（所有者の決定。厳しめに守る）:
+//   - 画面全体を明るくするのは FlashAmount*exp(-FlashDecay*Beat) の白への明滅 1 つだけ。Beat の周期に 1 回
+//     （拍頭）しか起きない。BPM 180 で毎秒 3 回になる。
+//     注意: Uniform に BPM が無いので、BPM が 180 を超えるとシェーダーの側では毎秒 3 回を越えるのを止められない。
+//     その代わり、振れ幅を下の基準より小さくして、明滅の基準に当たらない強さに抑えている。
+//   - 振れ幅: 1 拍の中で、画面全体の平均の相対輝度の最大と最小の差が 0.1 を下回るよう FlashAmount を決めた
+//     （WCAG 2.x の閃光の定義は相対輝度で 10% 以上の変化）。検証の数値は PR を参照。
+//   - 赤一色の明滅はしない（明滅の色は白。赤は色収差の細い縁にしか出ない）。
+//   - Random（毎フレーム変わる）は、グリッチした行の横のずれの小さな揺れにだけ使う。ずれは絵を横に動かすだけで
+//     明るさをほとんど変えないので、毎フレームの全画面の明るさの変化にはならない。
+//   - グリッチの起きる場所は Time を GlitchRate 回/秒で区切った値から決める（Random ではない）。
+//     ブロックの塗りは暗く（BlockFill）、白黒の反転はしない。反転すると面積ぶんの明るさが一度に変わるため。
+//
+// 1 画素あたりのループ: なし（0 回）。下地の関数を色収差のために 3 回呼ぶ。
+package main
+
+var Time float
+var Beat float
+var Random float
+var Resolution vec2
+
+// ---- 調整用の値 ------------------------------------------------------------
+
+// 拍頭の白への明滅の強さと、引く速さ。強さを上げると光の明滅の基準を越えるので、上げるときは測り直す。
+const FlashAmount = 0.22
+const FlashDecay = 12.0
+
+// 色収差の幅（画面の高さに対する割合）の常時の値と拍頭の増分。
+const ChromaBase = 0.002
+const ChromaKick = 0.024
+
+// グリッチの起きる割合の常時の値と拍頭の増分、引く速さ。
+const GlitchBase = 0.03
+const GlitchKick = 0.45
+const GlitchDecay = 6.0
+
+// 行のずれの大きさ（画面の高さに対する割合）の常時の値と拍頭の増分。
+const ShiftBase = 0.06
+const ShiftKick = 0.3
+
+// グリッチの場所が切り替わる回数（1 秒あたり）。
+const GlitchRate = 10.0
+
+// 行のグリッチの帯の高さ（画素）、ずれた帯の横の量子化の幅（画素）、ブロックの大きさ（画素）。
+const RowHeightPx = 18.0
+const RowPixelPx = 10.0
+const BlockPx = 72.0
+
+// ブロックのグリッチの色（線の色, AcidR/G/B）と、ブロックの塗りの明るさ（黄緑に掛ける）。
+const AcidR = 0.78
+const AcidG = 1.0
+const AcidB = 0.05
+
+const BlockFill = 0.07
+
+// 走査線の間隔（画素）と、暗くする行の明るさ。
+const ScanlinePx = 3.0
+const ScanlineDim = 0.72
+
+// ---------------------------------------------------------------------------
+
+func hash21(p vec2) float {
+	q := fract(vec3(p.x, p.y, p.x) * 0.1031)
+	q += dot(q, q.yzx+33.33)
+	return fract((q.x + q.y) * q.z)
+}
+
+// base は下地の明るさ（0〜1）。uv は画面の中心が原点、画面の高さが 1。punch は拍頭で 1、拍の中で 0 へ引く。
+func base(uv vec2, punch float) float {
+	// 角の丸い四角の輪（中心から広がる）。拍頭で少し寄る。
+	q := abs(uv) * (1.0 + 0.12*punch)
+	d := max(q.x, q.y) + 0.045*length(q)
+	rings := fract(d*5.0 - Time*0.6)
+	v := (1.0 - smoothstep(0.0, 0.03, abs(rings-0.5)-0.06)) * 0.85
+
+	// 横に流れるデータの帯。帯ごとに向きと速さを変える。
+	row := floor(uv.y * 22.0)
+	if hash21(vec2(row, 3.0)) > 0.72 {
+		xs := uv.x*10.0 + Time*(1.0+3.0*hash21(vec2(row, 9.0)))*sign(hash21(vec2(row, 5.0))-0.5)
+		dash := step(0.55, hash21(vec2(floor(xs), row)))
+		v = max(v, dash*0.45*step(0.3, fract(uv.y*22.0)))
+	}
+
+	// 中央の十字。
+	arm := min(abs(uv.x), abs(uv.y))
+	v = max(v, (1.0-smoothstep(0.004, 0.008, arm))*step(max(abs(uv.x), abs(uv.y)), 0.09))
+
+	return v
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	p := dstPos.xy
+	env := exp(-GlitchDecay * Beat)
+	flash := FlashAmount * exp(-FlashDecay*Beat)
+	punch := exp(-8.0 * Beat)
+	seed := floor(Time * GlitchRate)
+	amount := GlitchBase + GlitchKick*env
+
+	q := p
+
+	// 行のグリッチ: 帯ごとに横へずらし、横方向に粗く量子化する。
+	row := floor(p.y / RowHeightPx)
+	if hash21(vec2(row, seed)) < amount {
+		off := (hash21(vec2(row, seed+0.5)) - 0.5) * (ShiftBase + ShiftKick*env) * Resolution.y
+		off += (Random - 0.5) * 0.02 * Resolution.y
+		q.x = floor((q.x+off)/RowPixelPx)*RowPixelPx + 0.5*RowPixelPx
+	}
+
+	// ブロックのグリッチ: ずらして黄緑に染める。
+	blk := floor(p / BlockPx)
+	tint := 0.0
+	acid := vec3(AcidR, AcidG, AcidB)
+	if hash21(blk+vec2(seed*1.37, seed*0.71)) < amount*0.35 {
+		q.x += (hash21(blk+vec2(seed*2.11, 7.0)) - 0.5) * 0.5 * BlockPx
+		tint = 1.0
+	}
+
+	uv := (q - 0.5*Resolution) / Resolution.y
+	uv.y = -uv.y
+	ch := vec2(ChromaBase+ChromaKick*env, 0.0)
+	r := base(uv+ch, punch)
+	g := base(uv, punch)
+	b := base(uv-ch, punch)
+	c := vec3(r, g, b) * vec3(0.92, 0.96, 1.0)
+	if tint > 0.5 {
+		c = acid * max(max(r, g), b)
+		c = max(c, acid*BlockFill)
+	}
+
+	// 走査線。dstPos は画素の中心（n+0.5）なので floor で行番号にする。
+	if mod(floor(p.y), ScanlinePx) < 1.0 {
+		c *= ScanlineDim
+	}
+
+	// 拍頭の白への明滅（1 拍に 1 回）。画面全体の明るさを変えるのはここだけ。
+	c = mix(c, vec3(1.0), flash)
+
+	return vec4(c, 1.0)
+}
