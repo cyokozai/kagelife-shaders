@@ -28,7 +28,7 @@ var Resolution vec2
 const BallCount = 6
 
 // 玉の半径の基準（画面の高さに対する割合）。
-const BallRadius = 0.105
+const BallRadius = 0.12
 
 // 拍頭の膨らみ（半径の増分の割合）。上げると拍頭の画面全体の明るさの差が増える。
 const SwellAmount = 0.2
@@ -117,11 +117,13 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 
 	// 中身の色: 玉ごとの色を場の重みで混ぜ、芯ほど白に近い黄へ。
 	base := tint / max(field, 1e-4)
-	core := clamp((field-1.0)/4.0, 0.0, 1.0)
-	body := mix(base, vec3(1.0, 0.86, 0.5), smoothstep(0.35, 1.0, core))
+	core := clamp((field-1.0)/6.0, 0.0, 1.0)
+	coreMix := smoothstep(0.3, 1.0, core)
+	body := mix(base, vec3(1.0, 0.8, 0.45), coreMix)
 
-	// 面の向き: 場の対数の勾配（中心ほど平ら、縁ほど傾く）。
-	g := grad / max(field, 1e-4) * NormalScale
+	// 面の向き: 高さを h = 1 - 1/場 とみなした勾配 ∇h = ∇場/場²。中心では 0 に近づいて平ら、縁ほど傾く。
+	// （場の対数の勾配は玉の中心で発散し、芯に黒い点が出たので使わない。）
+	g := grad / max(field*field, 1e-4) * NormalScale
 	n := normalize(vec3(-g, 1.0))
 	l := normalize(vec3(-0.5, 0.6, 1.0))
 	h := normalize(l + vec3(0.0, 0.0, 1.0))
@@ -133,7 +135,8 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	aa := max(px*1.5, 0.01)
 	inside := smoothstep(1.0-aa, 1.0+aa, field)
 
-	shaded := body*diff + vec3(1.0, 0.95, 0.9)*spec*0.6
+	// 芯は自ら光るものとして陰影を弱める（陰で濁った色にしない）。
+	shaded := body*mix(diff, 1.1, coreMix) + vec3(1.0, 0.95, 0.9)*spec*0.6
 	col := mix(bg, shaded, inside)
 
 	// 縁の光（拍頭で強まる）。
