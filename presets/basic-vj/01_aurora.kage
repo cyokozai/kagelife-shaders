@@ -5,10 +5,16 @@
 // 設計:
 //   - 夜空（紺から黒への縦のグラデーションと瞬く星）に、光のカーテンを CurtainCount 枚重ねる。
 //     カーテンは下端がくっきりして上へ長く薄れる形で、横に波打ちながらゆっくり流れる。縦の筋は 1 次元のノイズで作る。
-//   - 色は下が緑、上が青緑から紫。手前の下に山の影を置いて、地平を決める。
-//   - 動きはほぼ Time だけ。Beat は拍頭でカーテンの明るさを BreathAmount だけ上げる「呼吸」にしか使わない。
+//   - カーテンは画面の端から端まで同じ明るさにせず、横方向のノイズで濃い所と切れ目を作る（本物のオーロラの斑）。
+//   - 色は下が緑、上が青緑から紫。上の色は PaletteDrift 秒の周期で紫と青のあいだをゆっくり行き来する。
+//     手前の下に山の影を置いて地平を決め、山の稜線のすぐ上に緑の薄い大気光を置く。
+//   - 明るさの和は 1 - exp(-x) で丸め、カーテンが重なった所でも白く飛ばない。
+//   - 動きはほぼ Time だけ。Beat は「呼吸」にだけ使う。呼吸は (0.5+0.5cos(2πBeat))^BreathShape の
+//     なめらかな山で、拍頭で最大・拍の中ほどで 0、拍の継ぎ目でも値が飛ばない（明るさの段差を作らない）。
+//     呼吸でカーテンが BreathAmount だけ明るくなり、BreathReach だけ上へ伸びる。全画面の明滅にはならない。
+//   - 乱数は sin を使わない fract のハッシュにした。Time が何時間ぶん大きくなっても模様が崩れにくい。
 //
-// 1 画素あたりのループ: CurtainCount 回（4 回）。
+// 1 画素あたりのループ: CurtainCount 回（4 回）。入れ子のループは無い。
 package main
 
 var Time float
@@ -24,33 +30,57 @@ const CurtainCount = 4
 const DriftSpeed = 0.035
 
 // カーテンの下端の高さの基準（画面の中心が 0、上が正。画面の高さを 1 とする）。
-const CurtainBase = -0.08
+const CurtainBase = -0.10
 
 // カーテンの下端が上下に揺れる幅。
-const CurtainWave = 0.12
+const CurtainWave = 0.14
 
 // カーテンが上へ薄れる速さ（大きいほど背が低い）。
-const FadeUp = 3.2
+const FadeUp = 2.6
 
 // カーテンの下端のくっきり具合（大きいほど鋭い）。
-const EdgeSharp = 38.0
+const EdgeSharp = 40.0
 
 // カーテン 1 枚の明るさ。
-const CurtainGain = 0.42
+const CurtainGain = 0.55
 
-// 拍頭の呼吸の強さ（明るさの増分の割合）。小さく保つ。
-const BreathAmount = 0.08
+// カーテンの斑の細かさ（大きいほど切れ目が多い）。
+const PatchScale = 0.9
 
-// 呼吸が拍頭から引く速さ。
-const BreathDecay = 3.0
+// 拍頭の呼吸で明るさが増える割合。小さく保つ（大きくすると点滅に見える）。
+const BreathAmount = 0.10
+
+// 拍頭の呼吸でカーテンが上へ伸びる割合（FadeUp を何割ゆるめるか）。
+const BreathReach = 0.12
+
+// 呼吸の山の鋭さ（大きいほど拍頭の近くに寄る。1 で cos そのもの）。
+const BreathShape = 2.0
+
+// 上の色が紫と青を行き来する周期（秒）。
+const PaletteDrift = 47.0
+
+// 明るさを丸める強さ（大きいほど明るく、早く頭打ちになる）。
+const Exposure = 1.4
 
 // 星の多さ（画素の格子のうち星になる割合）。
 const StarDensity = 0.0025
 
+// 稜線の上の大気光の明るさ。
+const AirGlow = 0.05
+
+// 稜線の高さの基準。
+const RidgeBase = -0.36
+
 // ---------------------------------------------------------------------------
 
-func hash11(n float) float {
-	return fract(sin(n*127.1+3.3) * 43758.5453)
+const Pi = 3.14159265
+
+// hash11 は sin を使わない 1 次元のハッシュ（0〜1）。
+func hash11(p float) float {
+	p = fract(p * 0.1031)
+	p *= p + 33.33
+	p *= p + p
+	return fract(p)
 }
 
 func hash21(p vec2) float {
@@ -78,11 +108,21 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	cell := floor(dstPos.xy / 2.0)
 	h := hash21(cell)
 	if h < StarDensity {
-		tw := 0.6 + 0.4*sin(Time*(1.0+h*900.0)+h*6283.0)
-		sky += vec3(0.8, 0.85, 1.0) * tw * 0.7
+		hs := h / StarDensity
+		tw := 0.6 + 0.4*sin(Time*(0.8+hs*2.0)+hs*6.283)
+		sky += vec3(0.8, 0.85, 1.0) * tw * 0.6
 	}
 
-	breath := 1.0 + BreathAmount*exp(-BreathDecay*Beat)
+	// 呼吸（拍頭で 1、拍の中ほどで 0。拍の継ぎ目で連続）。
+	bp := pow(0.5+0.5*cos(2.0*Pi*Beat), BreathShape)
+	gain := 1.0 + BreathAmount*bp
+	reach := 1.0 - BreathReach*bp
+
+	// 上の色のゆっくりした移ろい（紫 ⇄ 青）。
+	pd := 0.5 + 0.5*sin(2.0*Pi*Time/PaletteDrift)
+	low := vec3(0.15, 1.0, 0.45)
+	mid := vec3(0.08, 0.75, 0.85)
+	top := mix(vec3(0.62, 0.22, 0.95), vec3(0.25, 0.35, 1.0), pd)
 
 	// カーテン。
 	glow := vec3(0.0)
@@ -93,22 +133,24 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		d := uv.y - base
 		shape := 0.0
 		if d > 0.0 {
-			shape = exp(-d * FadeUp * (1.0 + 0.3*fi))
+			shape = exp(-d * FadeUp * (1.0 + 0.3*fi) * reach)
 		} else {
 			shape = exp(d * EdgeSharp)
 		}
 		rays := 0.35 + 0.65*noise1(x*26.0+Time*0.25+fi*13.0)
-		low := vec3(0.15, 1.0, 0.45)
-		mid := vec3(0.1, 0.75, 0.85)
-		top := vec3(0.65, 0.25, 0.95)
+		patch := smoothstep(0.2, 0.7, noise1(x*PatchScale+fi*5.1+Time*0.03))
 		t := clamp(d*3.0, 0.0, 1.0)
 		col := mix(mix(low, mid, smoothstep(0.0, 0.5, t)), top, smoothstep(0.4, 1.0, t))
-		glow += col * shape * rays * CurtainGain / (1.0 + 0.4*fi)
+		glow += col * shape * rays * (0.25 + 0.75*patch) * CurtainGain / (1.0 + 0.4*fi)
 	}
-	c := sky + glow*breath
+	glow = vec3(1.0) - exp(-glow*gain*Exposure)
+
+	// 稜線の上の大気光。
+	air := vec3(0.1, 0.6, 0.35) * AirGlow * exp(-max(uv.y-RidgeBase, 0.0)*6.0)
+	c := sky + air + glow
 
 	// 手前の山の影。
-	ridge := -0.36 + 0.06*noise1(uv.x*3.0+11.0) + 0.025*noise1(uv.x*11.0+3.0)
+	ridge := RidgeBase + 0.06*noise1(uv.x*3.0+11.0) + 0.025*noise1(uv.x*11.0+3.0)
 	c = mix(c, vec3(0.004, 0.006, 0.012), 1.0-smoothstep(ridge-0.003, ridge+0.003, uv.y))
 
 	return vec4(c, 1.0)
