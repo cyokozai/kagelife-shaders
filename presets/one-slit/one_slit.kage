@@ -43,6 +43,9 @@ const Wavelength = 11.0
 const WaveSpeed = 48.0
 
 // 1 周の長さ（秒）。原作 FRAMES=120 / FPS=24 = 5 秒（48 行）。各波源は 1 周に 1 回放つ。
+// 前提: pulse は経過時間を最も近い 1 回の発火に折り返すので、1 周で進む距離 WaveSpeed*LoopPeriod が
+// 波の幅 2*PulseCutoff*Wavelength 以上のときだけ正しい（いまは 240 セル ≥ 46.2 セル）。
+// これを下回ると前後の周の波が重なるはずの所で片方が消える。
 const LoopPeriod = 5.0
 
 // 波源の数。原作 gaps 配列の長さ 17（54 行）。ループの回数なので定数のまま変える。
@@ -57,6 +60,7 @@ const SlitSamples = 8
 const Decay = 0.0
 
 // Ricker 波を打ち切る位相（周期の数）。原作は |d|<46 ステップ（91 行）= 46×F0 ≈ 2.1 周期。
+// WaveSpeed*LoopPeriod >= 2*PulseCutoff*Wavelength を保つこと（LoopPeriod の説明を参照）。
 const PulseCutoff = 2.1
 
 // 波源 1 つの振幅の基準。原作の差分法の振幅とこの近似の振幅は対応しないので、
@@ -210,7 +214,11 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	z = z / (1.0 + abs(z)*0.22)
 
 	// 法線は画面の微分から作る（原作 FF 64〜65 行は隣のセルとの差）。画面は y が下向きなので y の符号を返す。
-	dzdx := dfdx(z) * pxPerCell
+	// height は仕切りの位置 x=wallX で式が切り替わり（左は直接波、右はホイヘンスの和）、高さが不連続になる。
+	// 仕切りが 2×2 画素の組をまたぐと dfdx がこの段差を傾きと読み、スリットの所に暗い筋が出る。
+	// そこで、組の中で左右が混ざっているときだけ x 方向の傾きを 0 にする。dfdx は分岐の外で呼ぶこと。
+	side := step(wallX, p.x)
+	dzdx := dfdx(z) * pxPerCell * (1.0 - clamp(abs(dfdx(side)), 0.0, 1.0))
 	dzdy := -dfdy(z) * pxPerCell
 	n := normalize(vec3(-dzdx, -dzdy, 1.0))
 	l := vec3(cos(LightAzimuth)*cos(LightElevation), sin(LightAzimuth)*cos(LightElevation), sin(LightElevation))
