@@ -1,0 +1,253 @@
+//kage:unit pixels
+
+// one_slit.kage — 単スリットを通る波の Kage 版アレンジ。
+//
+// 原作: cnzn0「one-slit」 https://github.com/cnzn0/one-slit （MIT License, Copyright (c) 2026 cnzn0）
+// このファイルは原作の場面（17 個の波源・スリットが 1 つ開いた仕切り・氷色の波頭）を Kage で組み直したもので、
+// 原作のコードの写しではない。原作の著作権表示と許諾文は同じフォルダの NOTICE にある。
+//
+// 原作との違い（所有者の決定）:
+//   - 原作は波動方程式を時間発展させて 120 フレームを焼いておく。kagelife は前のフレームをシェーダーに
+//     渡せないので、ここでは状態を持たない解析的な近似にした。
+//   - 各波源は周期 LoopPeriod 秒ごとに 1 回、Ricker 波（メキシカンハット）を円形に放つ。
+//   - スリットを抜けた波は、開口に並べた SlitSamples 個の点を新しい波源とみなして足し合わせる（ホイヘンス）。
+//     開口幅と波長の比で回折の広がりが変わる。
+//   - 仕切りでの反射と、原作の 12 標本の光線方向の影は省いた。粒子のテクスチャは画素ごとのハッシュで代える。
+//   - 波源の位置・発火時刻・強さは、波源番号の決まったハッシュで作る（毎フレーム変わる Random は使わない）。
+//
+// 長さの単位は「セル」（原作の格子 1 マス）。画面の高さを DomainHeight セルに合わせる。
+package main
+
+var Time float
+var Resolution vec2
+
+// ---- 調整用の値 ------------------------------------------------------------
+// 原作の値は cnzn0/one-slit の docs/engine.js の行番号で示す。
+
+// 画面の高さに入るセル数。原作 ny=250（48 行）。
+const DomainHeight = 250.0
+
+// 仕切りの位置（画面の幅に対する割合）。原作 WX=205 / nx=750（48・49 行）。
+const WallXFrac = 0.2733
+
+// スリットの開口幅（セル）。原作 GAP=[122,127] の 6 セル（49 行）。
+const SlitWidth = 6.0
+
+// スリットの中心（画面の高さに対する割合）。原作 (122+127+1)/2=125 → 125/250（49 行）。
+const SlitCenterFrac = 0.5
+
+// 波長（セル）。原作 LAM=11（50 行）。SlitWidth/Wavelength が小さいほど回折で広く広がる。
+const Wavelength = 11.0
+
+// 波の速さ（セル/秒）。原作 c=0.5 セル/ステップ × SUB=4 × FPS=24 = 48（48 行）。
+const WaveSpeed = 48.0
+
+// 1 周の長さ（秒）。原作 FRAMES=120 / FPS=24 = 5 秒（48 行）。各波源は 1 周に 1 回放つ。
+// 前提: pulse は経過時間を最も近い 1 回の発火に折り返すので、1 周で進む距離 WaveSpeed*LoopPeriod が
+// 波の幅 2*PulseCutoff*Wavelength 以上のときだけ正しい（いまは 240 セル ≥ 46.2 セル）。
+// これを下回ると前後の周の波が重なるはずの所で片方が消える。
+const LoopPeriod = 5.0
+
+// 波源の数。原作 gaps 配列の長さ 17（54 行）。ループの回数なので定数のまま変える。
+const SourceCount = 17
+
+// スリットの開口に並べるホイヘンスの点の数。間隔 SlitWidth/SlitSamples が Wavelength/2 より
+// 小さければ折り返し（偽の回折縞）が出ない。8 点なら開口幅 44 セルまで安全。
+const SlitSamples = 8
+
+// 波の振幅の減衰（1/セル）。振幅に exp(-Decay*距離) を掛ける。原作は内部の減衰が無く、
+// 外周 26 セルだけが吸収する（86 行）ので、0 が原作に近い。遠くを静かにしたいときに上げる。
+const Decay = 0.0
+
+// Ricker 波を打ち切る位相（周期の数）。原作は |d|<46 ステップ（91 行）= 46×F0 ≈ 2.1 周期。
+// WaveSpeed*LoopPeriod >= 2*PulseCutoff*Wavelength を保つこと（LoopPeriod の説明を参照）。
+const PulseCutoff = 2.1
+
+// 波源 1 つの振幅の基準。原作の差分法の振幅とこの近似の振幅は対応しないので、
+// 原作のポスター（docs/assets/poster.png）と見比べて決めた値（原作に対応する行は無い）。
+// 上げると光る波頭が増え、下げると暗く疎になる。
+const Amplitude = 0.45
+
+// 仕切りの左（波源側）の表示倍率。原作 gain=2.6（87 行）。
+const LeftGain = 2.6
+
+// 仕切りの右（スリットを抜けた側）の表示倍率と、距離による減衰を打ち消す範囲（セル）。
+// 原作 gain=min(26, 7.5*sqrt(1+r/5))（87 行）は r≈55 セルまで距離の減衰を打ち消すので、その距離を使う。
+const RightGain = 2.6
+const RightFlatRange = 55.0
+
+// 光の向き（方位角・仰角, ラジアン）。原作 az=-.5, el=.3（82 行）。
+const LightAzimuth = -0.5
+const LightElevation = 0.3
+
+// 仕切りの線の太さ。原作 1.5px（高さ 500px のとき, 98 行）。
+const WallLineWidth = 1.5
+const WallLineRefHeight = 500.0
+
+// 色は Fragment の中にある（原作 FF の 78〜80 行と 98 行の #C6C7C1）。
+
+// ---------------------------------------------------------------------------
+
+const pi = 3.14159265
+
+// hash は原作 engine.js 29 行と同じ式の擬似乱数（0〜1）。波源番号から決まった値を作る。
+func hash(n float) float {
+	return fract(sin(n*127.1+3.3) * 43758.5453)
+}
+
+// hash2 は画素の座標から 0〜1 の値を作る（粒子用。sin を使わない形で、大きな座標でも崩れにくい）。
+func hash2(p vec2) float {
+	q := fract(vec3(p.x, p.y, p.x) * 0.1031)
+	q += dot(q, q.yzx+33.33)
+	return fract((q.x + q.y) * q.z)
+}
+
+// ricker は Ricker 波。s は位相（周期の数）。原作 ricker（45 行）を位相で書き直したもの。
+func ricker(s float) float {
+	x := pi * s
+	y := x * x
+	return (1.0 - 2.0*y) * exp(-y)
+}
+
+// pulse は波源から距離 r（セル）の点に、発火時刻 t0 の波がいま作る変位。
+// 経過時間を 1 周の中で最も近い発火に折り返すのは原作の force（91 行）と同じ考え方。
+func pulse(r, t0 float) float {
+	period := WaveSpeed * LoopPeriod
+	d := WaveSpeed*(Time-t0) - r
+	d = mod(d+0.5*period, period) - 0.5*period
+	s := d / Wavelength
+	if abs(s) >= PulseCutoff {
+		return 0.0
+	}
+	return ricker(s)
+}
+
+// spread は 2 次元の円筒波の振幅の落ち方（波源のすぐ近くで発散しないよう 1 波長で丸める）と減衰。
+func spread(r float) float {
+	return Amplitude * exp(-Decay*r) / sqrt(1.0+r/Wavelength)
+}
+
+// sourcePos は i 番目の波源の位置（セル）。分布は原作の ARR（54〜55 行）:
+// x は仕切りの手前の範囲に r^0.8 で寄せ、y は上下の余白 34 セルを除いた範囲。
+func sourcePos(n, wallX float) vec2 {
+	x := wallX * (40.0/205.0 + (135.0/205.0)*pow(hash(n*3.0+1.0), 0.8))
+	y := 34.0 + (DomainHeight-68.0)*hash(n*3.0+2.0)
+	return vec2(x, y)
+}
+
+// sourceTime は i 番目の波源の発火時刻（秒, 0〜LoopPeriod）。
+func sourceTime(n float) float {
+	return hash(n*3.0+4.5) * LoopPeriod
+}
+
+// sourceWeight は i 番目の波源の強さ。原作 55 行と同じ 3 段階（2 割が 1.7、4 割が 1、残りが 0.6）。
+func sourceWeight(n float) float {
+	h := hash(n*3.0 + 3.0)
+	if h < 0.2 {
+		return 1.7
+	}
+	if h < 0.6 {
+		return 1.0
+	}
+	return 0.6
+}
+
+// slitPoint は j 番目のホイヘンス点の y（セル）。開口を SlitSamples 等分した各区間の中央。
+func slitPoint(j int, slitY float) float {
+	return slitY + SlitWidth*((float(j)+0.5)/float(SlitSamples)-0.5)
+}
+
+// height は点 p（セル）の水面の高さ。仕切りの左は直接波、右はスリットのホイヘンス点の和。
+func height(p vec2, wallX, slitY float) float {
+	z := 0.0
+	if p.x < wallX {
+		// 左: SourceCount 回。
+		for i := 0; i < SourceCount; i++ {
+			n := float(i)
+			r := length(p - sourcePos(n, wallX))
+			z += sourceWeight(n) * pulse(r, sourceTime(n)) * spread(r)
+		}
+		return z * LeftGain
+	}
+
+	// 右: ホイヘンス点から p までの距離と係数を先に求める（SlitSamples 回）。
+	var r2 [SlitSamples]float
+	var k2 [SlitSamples]float
+	for j := 0; j < SlitSamples; j++ {
+		d := p - vec2(wallX, slitPoint(j, slitY))
+		r := length(d)
+		r2[j] = r
+		// 傾き係数 (1+cosθ)/2（真横へ行く波ほど弱い）× 距離の減衰（RightFlatRange までは打ち消す）。
+		k2[j] = 0.5 * (1.0 + d.x/max(r, 1e-3)) * exp(-Decay*r) *
+			sqrt((1.0+RightFlatRange/Wavelength)/(1.0+max(r, RightFlatRange)/Wavelength))
+	}
+	// SourceCount × SlitSamples 回。
+	for i := 0; i < SourceCount; i++ {
+		n := float(i)
+		sp := sourcePos(n, wallX)
+		t0 := sourceTime(n)
+		w := sourceWeight(n)
+		for j := 0; j < SlitSamples; j++ {
+			r1 := length(vec2(wallX, slitPoint(j, slitY)) - sp)
+			z += w * pulse(r1+r2[j], t0) * spread(r1) * k2[j]
+		}
+	}
+	// ホイヘンスの和は開口の長さの積分なので、点の平均に開口幅を掛ける（原作の 6 セルで 1 倍になるよう割る）。
+	// 開口を広げると通る波が増え、正面へ絞られる。
+	return z / float(SlitSamples) * (SlitWidth / 6.0) * RightGain
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	bgColor := vec3(0.0431, 0.0431, 0.0471)
+	crestColor := vec3(0.46, 0.49, 0.64)
+	catchColor := vec3(0.93, 0.94, 0.97)
+	wallColor := vec3(0.776, 0.780, 0.757)
+
+	pxPerCell := Resolution.y / DomainHeight
+	p := dstPos.xy / pxPerCell
+	domainW := Resolution.x / pxPerCell
+	wallX := floor(domainW*WallXFrac) + 0.5
+	slitY := DomainHeight * SlitCenterFrac
+
+	// 原作 HF（57 行）と同じく、高さを柔らかく頭打ちにする。
+	z := height(p, wallX, slitY)
+	z = z / (1.0 + abs(z)*0.22)
+
+	// 法線は画面の微分から作る（原作 FF 64〜65 行は隣のセルとの差）。画面は y が下向きなので y の符号を返す。
+	// height は仕切りの位置 x=wallX で式が切り替わり（左は直接波、右はホイヘンスの和）、高さが不連続になる。
+	// 仕切りが 2×2 画素の組をまたぐと dfdx がこの段差を傾きと読み、スリットの所に暗い筋が出る。
+	// そこで、組の中で左右が混ざっているときだけ x 方向の傾きを 0 にする。dfdx は分岐の外で呼ぶこと。
+	side := step(wallX, p.x)
+	dzdx := dfdx(z) * pxPerCell * (1.0 - clamp(abs(dfdx(side)), 0.0, 1.0))
+	dzdy := -dfdy(z) * pxPerCell
+	n := normalize(vec3(-dzdx, -dzdy, 1.0))
+	l := vec3(cos(LightAzimuth)*cos(LightElevation), sin(LightAzimuth)*cos(LightElevation), sin(LightElevation))
+	r := max(0.0, dot(n, l)) / l.z
+	up := max(0.0, r-1.0)
+	dn := max(0.0, 1.0-r)
+
+	// 粒子: 原作の粒子テクスチャ（16〜18 行。平均 128/255・標準偏差 42/255 の正規乱数）を
+	// 一様乱数 3 つの和で近似する。
+	q0 := dstPos.xy
+	q1 := dstPos.xy*1.87 + 0.37
+	g0 := hash2(q0) + hash2(q0+17.0) + hash2(q0+41.0)
+	g1 := hash2(q1) + hash2(q1+23.0) + hash2(q1+59.0)
+	tex0 := 0.502 + 0.165*(g0-1.5)/0.5
+	tex1 := 0.502 + 0.165*(g1-1.5)/0.5
+	t0 := mix(clamp((tex0-0.22)/0.56, 0.0, 1.0), clamp((tex1-0.22)/0.56, 0.0, 1.0), 0.4)
+	cat := smoothstep(t0-0.06, t0+0.06, up*0.62) * smoothstep(0.02, 0.1, up)
+
+	// 色（原作 FF 78〜80 行）。
+	c := bgColor * (1.0 - 0.5*smoothstep(0.0, 1.0, dn))
+	c += crestColor * 0.17 * smoothstep(0.0, 1.3, up)
+	c = mix(c, catchColor, cat)
+
+	// 仕切りの線（スリットの所は空ける）。
+	lineW := WallLineWidth * Resolution.y / WallLineRefHeight
+	dx := abs(dstPos.x - wallX*pxPerCell)
+	onLine := 1.0 - smoothstep(0.5*lineW-0.5, 0.5*lineW+0.5, dx)
+	inGap := step(abs(p.y-slitY), 0.5*SlitWidth)
+	c = mix(c, wallColor, onLine*(1.0-inGap))
+
+	return vec4(c, 1.0)
+}
