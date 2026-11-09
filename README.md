@@ -11,6 +11,8 @@ presets/
   one-slit/
     one_slit.kage   単スリットを通る波（cnzn0「one-slit」のアレンジ）
     NOTICE          原作の MIT の著作権表示と許諾文
+  basic-vj/
+    01_aurora.kage … 09_glitch_strobe.kage   DJ の盛り上がりに合わせた基本の 9 枚
 go.mod
 shaders_test.go     presets/*/*.kage をすべて解析・型検査する検査
 ```
@@ -21,7 +23,35 @@ shaders_test.go     presets/*/*.kage をすべて解析・型検査する検査
 kagelife -shaders presets/one-slit
 ```
 
+```sh
+kagelife -shaders presets/basic-vj
+```
+
 `-shaders` は kagelife の `dev` ブランチにだけあり、まだリリースには入っていません。`dev` からビルドした kagelife で使ってください。
+
+## basic-vj の 9 枚
+
+kagelife はフォルダの `.kage` を名前の順に数字キー 1〜9 へ割り当てます。basic-vj は、番号が大きいほど激しくなるように並べています（Shift + 数字でクロスフェード）。
+
+| キー | ファイル | 絵 | 向いている場面 |
+|---|---|---|---|
+| 1 | `01_aurora.kage` | オーロラ | イントロ・ブレイク（いちばん静か） |
+| 2 | `02_metaballs.kage` | メタボール | 中低域のグルーヴ |
+| 3 | `03_mandala.kage` | 万華鏡マンダラ | 拍ごとに一段ずつ回る線画 |
+| 4 | `04_warp.kage` | ワープ | ビルドアップ |
+| 5 | `05_neon_grid.kage` | ネオングリッド | 透視の床と沈む太陽 |
+| 6 | `06_equalizer.kage` | イコライザ | 拍頭で跳ねる LED の棒 |
+| 7 | `07_tunnel.kage` | トンネル | 拍ごとに押し寄せる輪 |
+| 8 | `08_laser.kage` | レーザー | ピーク |
+| 9 | `09_glitch_strobe.kage` | グリッチストロボ | ドロップ（いちばん激しい） |
+
+9 枚に共通する決まり:
+
+- 画面全体を光らせるのは 1 拍に 1 回まで、かつ 1 秒に 3 回までにします（光に敏感な人への配慮）。
+- 拍の位相 `Beat` だけで動かし、4 拍ごとの周期の演出は入れません（kagelife は拍の番号を渡さないため）。
+- 上の 6 つの Uniform だけを使い、1 画素あたりの繰り返しを少なくします（各ファイルの冒頭にループの回数を書いています）。
+
+kagelife を `-llm-slots` 付きで起動すると、キー 8 と 9 は LLM の枠に予約されるので、`08_laser` と `09_glitch_strobe` はキーに載りません。
 
 ## 前提にしている Uniform
 
