@@ -27,7 +27,7 @@ kagelife -shaders presets/one-slit
 kagelife -shaders presets/basic-vj
 ```
 
-`-shaders` は kagelife の `dev` ブランチにだけあり、まだリリースには入っていません。`dev` からビルドした kagelife で使ってください。
+`-shaders` は kagelife の v0.1.0 以降に入っています。kagelife の入れ方は、本体の README の「インストール」を見てください。
 
 ## basic-vj の 9 枚
 
