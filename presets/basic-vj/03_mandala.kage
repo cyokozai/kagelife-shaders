@@ -1,0 +1,195 @@
+//kage:unit pixels
+
+// 03_mandala.kage — 万華鏡マンダラ。線画の幾何学模様が拍ごとに一段ずつ回り、拍頭から光の輪が外へ走る。
+//
+// 設計:
+//   - 角度を Segments 等分して鏡で折り返す（万華鏡）。折り返した 1 区画の中に、花弁の円・花の輪（隣と重なる円の鎖）・
+//     放射線・斜めの弦・点を細い線で描く。画面の隅まで模様が届くように、半径で 3 層に分ける。
+//   - 3 層は交互に逆向きに回る（内: 正、中: 逆、外: 正）。層の境目は同心円に重ねて継ぎ目を隠す。
+//   - 色は深い藍緑の地に金（内）→ 白金（中）→ 水色（外）の線。中心に淡い灯り。
+//   - Beat の使い方（すべて拍の中の位相だけで決まり、小節は数えない）:
+//       1. 回転: 拍ごとに 1 区画ぶん（2π/Segments）回る。回転角は Segments 回対称の周期と同じなので、
+//          拍の変わり目（Beat が 1 から 0 に戻る所）で角度が 1 区画戻っても絵は変わらない。
+//          進み方は 1-(1-Beat)^4 で、拍頭で素早く回ってから止まる（「カチッ」と一段進む）。
+//       2. 光の輪: 拍頭に中心から輪が出て、Beat が 1 になるまでに画面の隅まで広がる。輪が通る所の線も明るくなる。
+//       3. 線の明るさと寄り: 拍頭で線が明るくなり、ほんの少し寄る（exp(-GlowDecay*Beat) で引く）。
+//     明るさの山は 1 拍に 1 回だけ。光るのは線と輪だけで、画面全体の地の明るさは拍で変えない。
+//   - Random と Frame は使わない（毎フレームの明滅は無い）。
+//
+// 1 画素あたりのループ: RingCount 回（7 回）。ほかは固定の数の線だけ。
+package main
+
+var Time float
+var Beat float
+var Resolution vec2
+
+// ---- 調整用の値 ------------------------------------------------------------
+
+// 区画の数（対称の次数）。
+const Segments = 12.0
+
+// 同心円の数（ループの回数）。RingStart から RingGap ごとに並ぶ。
+const RingCount = 7
+
+// 最初の同心円の半径と、同心円の間隔（画面の高さに対する半径）。
+const RingStart = 0.06
+const RingGap = 0.13
+
+// 層の境目（画面の高さに対する半径）。内 < InnerRadius <= 中 < OuterRadius <= 外。
+// 継ぎ目が見えないよう、どちらも同心円の半径（RingStart + RingGap*k）に合わせておく。
+const InnerRadius = 0.19
+const OuterRadius = 0.45
+
+// 線の太さ（画素）。
+const LineWidthPx = 1.6
+
+// 拍とは別に常にかかるゆっくりした回転（ラジアン/秒）。
+const SlowSpin = 0.04
+
+// 拍頭の線の明るさの増分と、それが引く速さ。
+const GlowBoost = 0.8
+const GlowDecay = 5.0
+
+// 拍頭の寄り（0.03 で 3% 寄る）。
+const PunchZoom = 0.03
+
+// 光の輪の明るさと、輪が通る所の線を明るくする強さ・幅（半径）。
+const WaveGain = 0.9
+const WaveLift = 1.4
+const WaveWidth = 0.04
+
+// 金と水色の配分がゆっくり揺れる周期（秒）。
+const HueDrift = 23.0
+
+// ---------------------------------------------------------------------------
+
+const pi = 3.14159265
+
+// fold は点 uv を角度 rot だけ回してから万華鏡の 1 区画に折り返した座標を返す。
+// 区画の中心線が x 軸に来る（y は 0..r*sin(π/Segments)）。
+func fold(uv vec2, rot float) vec2 {
+	seg := 2.0 * pi / Segments
+	r := length(uv)
+	a := atan2(uv.y, uv.x) + rot
+	a = mod(a, seg)
+	a = abs(a - 0.5*seg)
+	return r * vec2(cos(a), sin(a))
+}
+
+// line は距離 d の所の線の濃さ（芯 + にじみ）。
+func line(d, w float) float {
+	return 1.0 - smoothstep(0.0, w, d) + 0.25*exp(-d/(w*5.0))
+}
+
+// circle は中心 c・半径 rad の円周の線。
+func circle(q, c vec2, rad, w float) float {
+	return line(abs(length(q-c)-rad), w)
+}
+
+// band は半径 r が lo..hi の中なら 1（端はなめらかに落とす）。
+func band(r, lo, hi float) float {
+	return smoothstep(lo-0.004, lo+0.004, r) * (1.0 - smoothstep(hi-0.004, hi+0.004, r))
+}
+
+// innerLayer は内層（r < InnerRadius）の模様。金の花。
+func innerLayer(q vec2, r, w float) float {
+	ink := 0.0
+	// 花弁の円 2 重。
+	ink += circle(q, vec2(0.11, 0.0), 0.055, w)
+	ink += circle(q, vec2(0.11, 0.0), 0.022, w) * 0.7
+	// 区画の中心線。
+	ink += line(abs(q.y), w) * 0.5 * band(r, 0.02, InnerRadius)
+	// 芯の点。
+	ink += line(max(r-0.012, 0.0), w)
+	return ink
+}
+
+// midLayer は中層（InnerRadius <= r < OuterRadius）の模様。花の輪と星形の弦。
+func midLayer(q vec2, r, w float) float {
+	ink := 0.0
+	// 花の輪: 半径 0.32 の円周上に中心を置いた円。半径を中心間の距離の半分より大きくして隣と重ねる。
+	d := 0.32
+	ink += circle(q, vec2(d, 0.0), d*sin(pi/Segments)*1.35, w)
+	// 花弁の小円。
+	ink += circle(q, vec2(0.24, 0.0), 0.028, w) * 0.8
+	// 斜めの弦（区画をまたいで星形になる）。
+	n := normalize(vec2(sin(0.55), -cos(0.55)))
+	ink += line(abs(dot(q-vec2(0.30, 0.0), n)), w) * 0.8
+	// 区画の境（折り返しの線）の上の点。
+	ink += line(max(length(q-0.40*vec2(cos(pi/Segments), sin(pi/Segments)))-0.007, 0.0), w)
+	return ink
+}
+
+// outerLayer は外層（r >= OuterRadius）の模様。画面の隅まで伸びる放射線と大きな花弁。
+func outerLayer(q vec2, r, w float) float {
+	ink := 0.0
+	// 大きな花弁（尖ったアーチ）: 鏡で折り返すと 2 つの円弧が区画の中心線で交わる。
+	ink += circle(q, vec2(0.52, -0.13), 0.21, w) * band(r, OuterRadius, 0.78)
+	// 花弁の内側の小円（花弁の尖りに掛からない位置）。
+	ink += circle(q, vec2(0.57, 0.0), 0.03, w) * 0.8
+	// 放射線（区画の中心線と境の線）。
+	ink += line(abs(q.y), w) * 0.55 * band(r, 0.72, 2.0)
+	s := sin(pi / Segments)
+	c := cos(pi / Segments)
+	ink += line(abs(q.x*s-q.y*c), w) * 0.35 * band(r, OuterRadius, 2.0)
+	// 遠くの点。
+	ink += line(max(length(q-vec2(0.86, 0.0))-0.01, 0.0), w)
+	return ink
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
+	uv.y = -uv.y
+	w := LineWidthPx / Resolution.y
+
+	b := fract(Beat)
+	seg := 2.0 * pi / Segments
+	turn := 1.0 - pow(1.0-b, 4.0)
+	env := exp(-GlowDecay * b)
+
+	// 拍頭でほんの少し寄る。
+	uv *= 1.0 - PunchZoom*env
+	r := length(uv)
+
+	// 層ごとに回して折り返す。内と外は正、中は逆向き。拍の段はどの層も 1 区画。
+	ink := 0.0
+	if r < InnerRadius {
+		ink = innerLayer(fold(uv, Time*SlowSpin+seg*turn), r, w)
+	} else if r < OuterRadius {
+		ink = midLayer(fold(uv, -Time*SlowSpin*1.3-seg*turn), r, w)
+	} else {
+		ink = outerLayer(fold(uv, Time*SlowSpin*0.6+seg*turn), r, w)
+	}
+
+	// 同心円（回らない）。層の境目の継ぎ目もこれで隠れる。
+	for k := 0; k < RingCount; k++ {
+		rk := RingStart + RingGap*float(k)
+		ink += line(abs(r-rk), w) * 0.6
+	}
+
+	// 光の輪: 拍頭に中心から出て、拍の終わりに画面の隅（半径 ~1.05）へ届く。
+	rw := 0.03 + 1.02*(1.0-pow(1.0-b, 2.0))
+	fade := pow(1.0-b, 1.5)
+	near := exp(-abs(r-rw) / WaveWidth)
+	wave := line(abs(r-rw), w*1.8) * fade
+
+	ink = clamp(ink, 0.0, 1.8) * (1.0 + WaveLift*near*fade)
+
+	// 色: 内は金、中は白金、外は水色。配分がゆっくり揺れる。
+	drift := 0.05 * sin(2.0*pi*Time/HueDrift)
+	gold := vec3(1.0, 0.72, 0.28)
+	pale := vec3(1.0, 0.93, 0.78)
+	aqua := vec3(0.3, 0.92, 0.95)
+	lc := mix(gold, pale, smoothstep(0.12+drift, 0.3+drift, r))
+	lc = mix(lc, aqua, smoothstep(0.38+drift, 0.62+drift, r))
+
+	// 地: 深い藍緑。中心の灯りは拍で変えない。
+	bg := mix(vec3(0.03, 0.08, 0.12), vec3(0.0, 0.012, 0.025), smoothstep(0.0, 0.9, r))
+	bg += vec3(0.12, 0.07, 0.02) * exp(-r*r/0.012)
+
+	col := bg + lc*ink*(0.5+GlowBoost*0.5*env)
+	// 光の輪は白金に寄せる。
+	col += mix(lc, pale, 0.5) * wave * WaveGain
+
+	return vec4(col, 1.0)
+}

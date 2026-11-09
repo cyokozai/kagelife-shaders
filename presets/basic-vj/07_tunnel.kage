@@ -1,0 +1,147 @@
+//kage:unit pixels
+
+// 07_tunnel.kage — トンネル。橙の六角形の輪が拍ごとに手前へ押し寄せ、拍頭に白い輪が奥から飛んでくる。
+//
+// 設計:
+//   - 画面の中心付近を奥とする六角形のトンネル。半径 r の点の奥行きを z = TunnelRadius/r とし、
+//     z を RingSpacing ごとに区切った所に光る輪を置く。奥は霧で黒に溶かし、消失点には赤い光を置く。
+//   - 色は溶けた金属の配色: 手前の輪は金白、中ほどは橙、奥は深紅。内面は暗い赤茶の市松と角の筋。
+//     ほかの 8 本（緑・青・紫・桃が中心）と被らないよう、赤〜橙だけで組む。輪の色は奥行きだけで決める。
+//   - 消失点はゆっくり揺れる。奥ほど大きくずらすので、トンネルが曲がりくねって見える。輪は奥へ行くほどねじれる。
+//   - Beat（3 つの効き方。どれも拍の番号を使わないので、拍の変わり目で絵が飛ばない）:
+//     1. 輪の位置を z/RingSpacing + e(Beat) が整数になる所とする（e(b) = 1-(1-b)^3）。1 拍で e が 0 から 1 まで
+//        進むので、どの輪も 1 拍でちょうど 1 区切り手前へ来る。e が 1 から 0 に戻っても並びは 1 区切りずれた
+//        だけで同じ絵になる。e は拍頭で速く進むので、拍頭で輪がぐっと押し寄せて止まる。
+//     2. 拍頭に白い輪（パルス）を奥 PulseFar で生み、1 拍かけて手前まで飛ばす。前の拍のパルスは手前で消え切って
+//        から入れ替わるので、拍の変わり目に見えるのは奥の霧の中に生まれる小さな輪だけ。
+//     3. 拍頭に輪の明るさを上げ、霧を薄くする（奥まで一瞬見通せる）。どちらも exp(-FlashDecay*Beat) で引く。
+//        明るさが上がるのは拍頭の 1 回だけ。光るのは輪と奥なので、画面全体が白く飛ぶことはない。
+//
+// 1 画素あたりのループ: なし（0 回）。
+package main
+
+var Time float
+var Beat float
+var Resolution vec2
+
+// ---- 調整用の値 ------------------------------------------------------------
+
+// トンネルの太さ（画面の高さに対する割合）。
+const TunnelRadius = 0.3
+
+// 輪の間隔（奥行きの単位）。
+const RingSpacing = 0.6
+
+// 輪の太さ（区切りに対する割合）。
+const RingWidth = 0.07
+
+// 多角形の辺の数。
+const Sides = 6.0
+
+// 奥へ行くほどのねじれ（ラジアン/奥行き）と、全体の回転の速さ（ラジアン/秒）。
+const Twist = 0.12
+const Spin = 0.15
+
+// 消失点の揺れの大きさ（画面の高さに対する割合）と速さ（ラジアン/秒）。
+const SwayAmount = 0.12
+const SwaySpeed = 0.31
+
+// 霧の濃さ（大きいほど奥が早く暗くなる）と、拍頭に薄くする割合。
+const Fog = 0.24
+const FogLift = 0.4
+
+// 手前の輪を薄くし始める奥行きと、消し切る奥行き（Start > End）。手前の輪は画面の大きな面積を
+// 占めるので、画面の外へ出る前に消して画面全体の明るさの振れを抑える。
+const NearFadeStart = 0.7
+const NearFadeEnd = 0.3
+
+// 拍頭の輪の明るさの増分と、引く速さ。
+const RingFlash = 0.9
+const FlashDecay = 5.0
+
+// パルス（拍頭に奥から飛んでくる白い輪）の生まれる奥行き・太さ（区切りに対する割合）・明るさ。
+const PulseFar = 7.0
+const PulseWidth = 0.09
+const PulseGain = 1.3
+
+// 消失点の赤い光の広がり（大きいほど小さい）と明るさ。
+const CoreSize = 18.0
+const CoreGain = 0.35
+
+// ---------------------------------------------------------------------------
+
+const pi = 3.14159265
+
+// palette は奥行き z の輪の色。手前の金白 → 橙 → 奥の深紅。
+func palette(z float) vec3 {
+	gold := vec3(1.0, 0.86, 0.55)
+	orange := vec3(1.0, 0.42, 0.06)
+	crimson := vec3(0.75, 0.04, 0.1)
+	c := mix(gold, orange, smoothstep(0.4, 2.0, z))
+	return mix(c, crimson, smoothstep(2.0, 6.0, z))
+}
+
+// band は d（区切りの中心からの距離）が太さ w の帯の中かを 0〜1 で返す。奥ほど輪が細く詰まるので、
+// 画面上の太さ fw で下限を付け、下限で太らせたぶん明るさを下げて点滅（エイリアス）を抑える。
+func band(d, w, fw float) float {
+	ww := max(w, fw*1.2)
+	return (1.0 - smoothstep(ww*0.5, ww, d)) * (w / ww)
+}
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
+	uv.y = -uv.y
+
+	b := Beat
+	e := 1.0 - (1.0-b)*(1.0-b)*(1.0-b)
+	env := exp(-FlashDecay * b)
+
+	// 消失点の揺れ。まず揺れなしの奥行きの目安 z0 を出し、奥ほど大きく中心をずらす（手前はほぼ動かない）。
+	sway := SwayAmount * vec2(sin(Time*SwaySpeed), sin(Time*SwaySpeed*1.37+1.0)*0.6)
+	z0 := TunnelRadius / max(length(uv), 1e-4)
+	p := uv - sway*(1.0-exp(-z0*0.35))
+
+	r := max(length(p), 1e-4)
+	a := atan2(p.y, p.x)
+
+	// ねじれを加えてから六角形の半径にする。2π は sector の整数倍なので atan2 の切れ目で絵は切れない。
+	ang := a + (TunnelRadius/r)*Twist + Time*Spin
+	sector := 2.0 * pi / Sides
+	m := mod(ang, sector) - 0.5*sector
+	z := TunnelRadius / max(r*cos(m), 1e-4)
+
+	fog := exp(-z * Fog * (1.0 - FogLift*env))
+	near := smoothstep(NearFadeEnd, NearFadeStart, z)
+
+	// 1. 輪の並び。
+	s := z/RingSpacing + e
+	d := abs(fract(s+0.5) - 0.5)
+	fw := abs(dfdx(s)) + abs(dfdy(s))
+	ring := band(d, RingWidth, fw)
+	glow := exp(-d*22.0) * 0.3
+
+	// 2. パルス。奥行き zp を 1 拍で PulseFar から 0 まで動かす。生まれた直後は霧と立ち上がりで薄い。
+	zp := PulseFar * (1.0 - b)
+	sp := abs(z-zp) / RingSpacing
+	pulse := band(sp, PulseWidth, fw) + exp(-sp*10.0)*0.35
+	pulse *= smoothstep(0.0, 0.06, b) * PulseGain
+
+	// 内面: 角の筋と、奥へ流れる市松模様。
+	edge := abs(m) / (0.5 * sector) // 0 が辺の中央、1 が角
+	corner := smoothstep(0.92, 1.0, edge)
+	cu := floor(ang/sector*2.0+0.5*Sides) + floor(z*2.0+Time*1.5)
+	checker := mod(cu, 2.0)
+
+	col := palette(z)
+
+	c := vec3(0.025, 0.004, 0.01)
+	c += vec3(0.2, 0.05, 0.03) * checker * 0.3 * fog
+	c += col * corner * 0.3 * fog
+	c += col * (ring + glow) * (0.7 + RingFlash*env) * fog * near
+	c += vec3(1.0, 0.95, 0.85) * pulse * fog * near
+
+	// 3. 消失点の赤い光（拍頭に少し強まる）。
+	c += vec3(0.9, 0.12, 0.05) * exp(-r*r*CoreSize*CoreSize) * CoreGain * (1.0 + 0.6*env)
+
+	return vec4(c, 1.0)
+}
