@@ -16,7 +16,8 @@
 //       拍頭で尾と画角が一度に変わるのが「突っ込む」手応えで、明るさの変化は拍に 1 回だけ（全画面の明滅はしない）。
 //   - 毎フレーム変わる Random は使わない（全画面のちらつきを作らない）。小節は数えない。
 //
-// 1 画素あたりのループ: LayerCount 回（20 回）。
+// 1 画素あたりのループ: LayerCount 回（20 回）。ただし星の尾の根元より内側の画素は、その層を
+// ハッシュ 1〜2 回で打ち切る（残りのハッシュ 2 回と exp 2 回を飛ばす。絵は変わらない）。
 package main
 
 var Time float
@@ -118,16 +119,24 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		// 星ごとに奥行きの位相をずらし、同じ層の星が輪になって来ないようにする。
 		u := hash21(key) - pos
 		z := fract(u)   // 0 が手前、1 が奥
+		Z := ZNear + z*(ZFar-ZNear)
+		// 尾の根元より内側（r < rt）の画素には、この層の星は何も足さない（下の along が 0 になる）。
+		// rho >= RhoMin なので rt >= RhoMin/(Z+trail)。これより内側なら、残りのハッシュと exp を飛ばす。
+		if r < RhoMin/(Z+trail) {
+			continue
+		}
+
 		gen := floor(u) // 奥へ戻るたびに変わる番号（戻ったら別の星にする）
 		k2 := key + gen*vec2(13.17, 3.71)
-		ha := hash21(k2 + 0.5)
 		hr := hash21(k2 + 9.1)
-		hc := hash21(k2 + 4.3)
-
-		Z := ZNear + z*(ZFar-ZNear)
 		rho := RhoMin + (RhoMax-RhoMin)*hr
-		rh := rho / Z           // 頭の画面上の半径
 		rt := rho / (Z + trail) // 尾の根元の画面上の半径
+		if r < rt {
+			continue
+		}
+		rh := rho / Z // 頭の画面上の半径
+		ha := hash21(k2 + 0.5)
+		hc := hash21(k2 + 4.3)
 
 		// 扇の中での星の角度（端に寄せすぎず、隣の扇へはみ出しにくくする）。
 		da := (sf - s - (0.2 + 0.6*ha)) * (tau / SectorCount)
