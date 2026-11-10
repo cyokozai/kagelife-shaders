@@ -16,7 +16,10 @@
 //       拍頭で尾と画角が一度に変わるのが「突っ込む」手応えで、明るさの変化は拍に 1 回だけ（全画面の明滅はしない）。
 //   - 毎フレーム変わる Random は使わない（全画面のちらつきを作らない）。小節は数えない。
 //
-// 1 画素あたりのループ: LayerCount 回（20 回）。
+// 1 画素あたりのループ: LayerCount 回（20 回）。ただし星から遠い画素は、その層をハッシュ 1〜3 回で打ち切り、
+// 残りのハッシュと exp 2 回を飛ばす。打ち切るのは次の 2 つ。
+//   - 尾の根元より内側（何も足さない所。絵は変わらない）
+//   - 星の頭・尾からの距離が cutK*wd より遠い所（足す量が色の成分ごとに GlowCut 未満。外側の淡い光をそこで切る）
 package main
 
 var Time float
@@ -69,6 +72,10 @@ const FovPunch = 0.035
 // 全体の回転の速さ（ラジアン/秒）。
 const RollSpeed = 0.04
 
+// 外側の淡い光を打ち切る明るさ（1 層・色の成分ごと, 0〜1）。8 bit の 1 段（1/255）の約 1/8。
+// 大きいほど軽くなるが、星の周りのにじみが削れる。
+const GlowCut = 0.0005
+
 // ---------------------------------------------------------------------------
 
 const tau = 6.2831853
@@ -107,6 +114,11 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	a := atan2(uv.y, uv.x)
 	trail := TrailBase + TrailSurge*pump
 
+	// 打ち切りの距離の係数。1 層が色の成分ごとに足す量は (line+glow)*along*bright*col で、
+	// along・fade・w/wd・col の成分は 1 以下、bright は StarGain 以下。dist >= 2*wd では line <= 0.25*glow なので、
+	// 足す量 <= 1.25*0.12*StarGain*exp(-dist/(4*wd))。これが GlowCut 未満になるのは dist > cutK*wd のとき。
+	cutK := max(4.0*log(0.15*StarGain/GlowCut), 2.0)
+
 	c := vec3(0.0)
 	for i := 0; i < LayerCount; i++ {
 		fi := float(i)
@@ -118,28 +130,47 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		// 星ごとに奥行きの位相をずらし、同じ層の星が輪になって来ないようにする。
 		u := hash21(key) - pos
 		z := fract(u)   // 0 が手前、1 が奥
+		Z := ZNear + z*(ZFar-ZNear)
+		// 尾の根元より内側（r < rt）の画素には、この層の星は何も足さない（下の along が 0 になる）。
+		// rho >= RhoMin なので rt >= RhoMin/(Z+trail)。これより内側なら、この層の残りを飛ばす（絵は変わらない）。
+		if r < RhoMin/(Z+trail) {
+			continue
+		}
+		w := min(StarWidth/Z, StarWidthMax)
+		wd := max(w, 0.8*px) // 1 画素より細い線は、幅を広げて明るさを落とす
+		// 星の頭・尾から dmax より遠い画素は、この層の足す量が GlowCut 未満なので飛ばす（下の cutK の説明）。
+		// 頭は rho/Z <= RhoMax/Z の所にあり、それより外では dist >= r - RhoMax/Z。
+		dmax := cutK * wd
+		if r > RhoMax/Z+dmax {
+			continue
+		}
+
 		gen := floor(u) // 奥へ戻るたびに変わる番号（戻ったら別の星にする）
 		k2 := key + gen*vec2(13.17, 3.71)
 		ha := hash21(k2 + 0.5)
-		hr := hash21(k2 + 9.1)
-		hc := hash21(k2 + 4.3)
-
-		Z := ZNear + z*(ZFar-ZNear)
-		rho := RhoMin + (RhoMax-RhoMin)*hr
-		rh := rho / Z           // 頭の画面上の半径
-		rt := rho / (Z + trail) // 尾の根元の画面上の半径
-
 		// 扇の中での星の角度（端に寄せすぎず、隣の扇へはみ出しにくくする）。
 		da := (sf - s - (0.2 + 0.6*ha)) * (tau / SectorCount)
-		dperp := r * abs(da)
+		dperp := r * abs(da) // 星の筋から横への距離（dist の下限）
+		if dperp > dmax {
+			continue
+		}
 
-		w := min(StarWidth/Z, StarWidthMax)
-		wd := max(w, 0.8*px) // 1 画素より細い線は、幅を広げて明るさを落とす
+		hr := hash21(k2 + 9.1)
+		rho := RhoMin + (RhoMax-RhoMin)*hr
+		rt := rho / (Z + trail) // 尾の根元の画面上の半径
+		if r < rt {
+			continue
+		}
+		rh := rho / Z // 頭の画面上の半径
 		// 頭より外は丸く閉じ、尾の中は根元へ向けて暗くなる。
 		dr := max(r-rh, 0.0)
 		dist := length(vec2(dr, dperp))
+		if dist > dmax {
+			continue
+		}
 		t := clamp((rh-r)/max(rh-rt, 1e-5), 0.0, 1.0)
-		along := (1.0 - t) * (1.0 - t) * step(rt, r)
+		along := (1.0 - t) * (1.0 - t)
+		hc := hash21(k2 + 4.3)
 		line := exp(-(dist*dist)/(wd*wd)) * (w / wd)
 		glow := 0.12 * exp(-dist/(4.0*wd)) * (w / wd)
 
