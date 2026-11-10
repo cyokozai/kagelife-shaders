@@ -1,57 +1,58 @@
 //kage:unit pixels
 
-// 02_metaballs.kage — メタボール。中低域のグルーヴ向け。
+// 02_metaballs.kage - Metaballs. For mid/low-end grooves.
 //
-// 設計:
-//   - 墨色に近い深い青緑の背景に、溶けた液体の玉を BallCount 個浮かべる。玉はそれぞれ別の周期の
-//     リサージュ曲線で漂い、近づくとくっついて 1 つの塊になる（場の和が 1 を越えた所が中身）。
-//   - 玉ごとに色を持たせ（マゼンタ・朱・琥珀・ホットピンク）、場の重みで混ぜる。くっついた所では
-//     色が溶け合う。中心ほど白に近い黄に寄せて、溶岩ランプの熱い芯にする。
-//   - 場の勾配から面の向きを作り、左上からの光で陰影と鏡面の光沢を付ける（濡れた液体に見せる）。
-//   - Beat（1 拍の中の位相）で 3 つを動かす。
-//       跳ね: 玉の高さ = BounceHeight * sin(π*Beat)。拍頭で一番下（着地）、拍の中ほどで一番上。
-//             Beat が 1 から 0 に戻っても位置は飛ばない。
-//       着地のつぶれ: 拍頭で横に広がり縦に縮む（SquashAmount、面積はほぼ保つ）。exp(-SquashDecay*Beat) で戻る。
-//       膨らみと縁の光: 拍頭で半径 × (1 + SwellAmount)、縁の光も強まる。exp(-SwellDecay*Beat) で引く。
-//     画面全体が明るくなるのは膨らみと縁の光による拍頭の 1 回だけ。Random は使わない（毎フレームの明滅なし）。
+// Design:
+//   - BallCount molten blobs on a deep ink-teal background. Each drifts on its own Lissajous curve;
+//     nearby blobs merge (inside = where the summed field exceeds 1).
+//   - Each blob has a color (magenta, vermilion, amber, hot pink), mixed by field weight, so colors
+//     blend where blobs merge. The core shifts toward near-white yellow (hot lava-lamp core).
+//   - Normals come from the field gradient; light from the upper left adds shading and specular (wet look).
+//   - Beat (phase within one beat) drives three things:
+//       Bounce: height = BounceHeight * sin(pi*Beat). Lowest (landing) at the downbeat, highest mid-beat.
+//               No position jump when Beat wraps from 1 to 0.
+//       Squash: at the downbeat, wider and shorter (SquashAmount, area ~kept). Recovers by exp(-SquashDecay*Beat).
+//       Swell + rim: at the downbeat, radius x (1 + SwellAmount) and a stronger rim. Decays by exp(-SwellDecay*Beat).
+//     The only full-screen brightening is swell + rim, once per beat at the downbeat.
+//     Random is not used (no per-frame flicker).
 //
-// 1 画素あたりのループ: BallCount 回（6 回）。ループは 1 つだけ。
+// Per-pixel loops: BallCount (6). Single loop.
 package main
 
 var Time float
 var Beat float
 var Resolution vec2
 
-// ---- 調整用の値 ------------------------------------------------------------
+// ---- Tuning ----------------------------------------------------------------
 
-// 玉の数（ループの回数）。
+// Number of blobs (loop count).
 const BallCount = 6
 
-// 玉の半径の基準（画面の高さに対する割合）。
+// Base blob radius (fraction of screen height).
 const BallRadius = 0.12
 
-// 拍頭の膨らみ（半径の増分の割合）。上げると拍頭の画面全体の明るさの差が増える。
+// Downbeat swell (fractional radius increase). Raising it increases the per-beat brightness swing.
 const SwellAmount = 0.2
 
-// 膨らみと縁の光が引く速さ。
+// Decay rate of swell and rim.
 const SwellDecay = 5.0
 
-// 拍頭の着地のつぶれ（横に広がる割合）。
+// Downbeat squash (fractional horizontal stretch).
 const SquashAmount = 0.22
 
-// つぶれが戻る速さ。膨らみより少し速く戻すと、弾む感じが出る。
+// Squash recovery rate. Slightly faster than swell gives a bouncy feel.
 const SquashDecay = 7.0
 
-// 跳ねの高さ（画面の高さに対する割合）。拍の中ほどで最大。
+// Bounce height (fraction of screen height). Max mid-beat.
 const BounceHeight = 0.045
 
-// 漂う速さ。
+// Drift speed.
 const DriftSpeed = 0.33
 
-// 陰影の強さ。大きいほど縁が丸く盛り上がって見える。
+// Shading strength. Larger = rounder, more raised edges.
 const NormalScale = 0.045
 
-// 縁の光の常時の強さと、拍頭に足す強さ。
+// Rim light: constant level and downbeat boost.
 const RimBase = 0.25
 const RimBeat = 0.55
 
@@ -61,7 +62,7 @@ func hash11(n float) float {
 	return fract(sin(n*127.1+3.3) * 43758.5453)
 }
 
-// ballColor は玉ごとの色。k は 0〜1 のハッシュ値。マゼンタ → 朱 → 琥珀 → ホットピンク の順に並べた。
+// ballColor returns a blob color. k is a 0..1 hash. Order: magenta -> vermilion -> amber -> hot pink.
 func ballColor(k float) vec3 {
 	if k < 0.25 {
 		return vec3(0.9, 0.08, 0.5)
@@ -77,13 +78,13 @@ func ballColor(k float) vec3 {
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
-	uv.y = -uv.y // 上を正にする。
+	uv.y = -uv.y // up is +.
 	aspect := Resolution.x / Resolution.y
 
 	swell := exp(-SwellDecay * Beat)
 	sq := SquashAmount * exp(-SquashDecay*Beat)
-	sx := 1.0 / (1.0 + sq) // 横は広がる（距離を縮めて測る）。
-	sy := 1.0 + sq         // 縦は縮む。
+	sx := 1.0 / (1.0 + sq) // wider (shrink measured x distance).
+	sy := 1.0 + sq         // shorter.
 	hop := sin(3.14159265 * Beat)
 	r := BallRadius * (1.0 + SwellAmount*swell)
 
@@ -96,33 +97,33 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		fy := 0.25 + 0.5*hash11(fi*5.7+1.0)
 		ph := hash11(fi*9.2+2.0) * 6.2832
 		c := vec2(0.38*aspect*sin(Time*DriftSpeed*fx+ph), 0.27*cos(Time*DriftSpeed*fy+ph*1.7))
-		// 跳ねの高さを玉ごとに少しずらす。
+		// Vary bounce height slightly per blob.
 		c.y += BounceHeight * hop * (0.6 + 0.4*hash11(fi+7.0))
 		ri := r * (0.75 + 0.5*hash11(fi*2.3+4.0))
 		d := uv - c
 		q := d.x*d.x*sx*sx + d.y*d.y*sy*sy + 1e-5
 		f := ri * ri / q
 		field += f
-		// f の勾配: -2 f/q * (sx² d.x, sy² d.y)
+		// Gradient of f: -2 f/q * (sx^2 d.x, sy^2 d.y)
 		grad += -2.0 * f / q * vec2(sx*sx*d.x, sy*sy*d.y)
 		tint += f * ballColor(hash11(fi*4.7+11.0))
 	}
 
-	// 背景: 墨色の青緑。上を少し明るく、中央に向けて沈める。
+	// Background: ink teal, slightly brighter at the top, darker toward the center.
 	bg := mix(vec3(0.0, 0.02, 0.03), vec3(0.01, 0.07, 0.09), clamp(uv.y+0.5, 0.0, 1.0))
 	bg *= 1.0 - 0.35*clamp(length(uv*vec2(0.8, 1.0)), 0.0, 1.0)
-	// 玉の周りのにじみ（熱の照り返し）。
+	// Halo around blobs (heat glow).
 	halo := smoothstep(0.25, 1.0, field)
 	bg += vec3(0.45, 0.08, 0.2) * 0.18 * halo
 
-	// 中身の色: 玉ごとの色を場の重みで混ぜ、芯ほど白に近い黄へ。
+	// Body color: blob colors mixed by field weight, toward near-white yellow at the core.
 	base := tint / max(field, 1e-4)
 	core := clamp((field-1.0)/6.0, 0.0, 1.0)
 	coreMix := smoothstep(0.3, 1.0, core)
 	body := mix(base, vec3(1.0, 0.8, 0.45), coreMix)
 
-	// 面の向き: 高さを h = 1 - 1/場 とみなした勾配 ∇h = ∇場/場²。中心では 0 に近づいて平ら、縁ほど傾く。
-	// （場の対数の勾配は玉の中心で発散し、芯に黒い点が出たので使わない。）
+	// Normal: treat height as h = 1 - 1/field, so grad h = grad field / field^2. Flat at the center, tilted at edges.
+	// (The gradient of log(field) diverges at blob centers and left black dots, so it is not used.)
 	g := grad / max(field*field, 1e-4) * NormalScale
 	n := normalize(vec3(-g, 1.0))
 	l := normalize(vec3(-0.5, 0.6, 1.0))
@@ -130,16 +131,16 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	diff := 0.45 + 0.55*max(dot(n, l), 0.0)
 	spec := pow(max(dot(n, h), 0.0), 36.0)
 
-	// 縁の切り替えは画素の幅で滑らかにする（場の勾配で 1 画素ぶんの場の変化を見積もる）。
+	// Antialias the edge over one pixel (estimate per-pixel field change from the gradient).
 	px := length(grad) / Resolution.y
 	aa := max(px*1.5, 0.01)
 	inside := smoothstep(1.0-aa, 1.0+aa, field)
 
-	// 芯は自ら光るものとして陰影を弱める（陰で濁った色にしない）。
+	// The core is self-lit, so weaken shading there (avoid muddy shadowed color).
 	shaded := body*mix(diff, 1.1, coreMix) + vec3(1.0, 0.95, 0.9)*spec*0.6
 	col := mix(bg, shaded, inside)
 
-	// 縁の光（拍頭で強まる）。
+	// Rim light (stronger at the downbeat).
 	rim := exp(-abs(field-1.0) * 10.0)
 	col += mix(base, vec3(1.0, 0.7, 0.9), 0.5) * rim * (RimBase + RimBeat*swell)
 

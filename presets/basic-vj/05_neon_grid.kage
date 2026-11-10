@@ -1,70 +1,73 @@
 //kage:unit pixels
 
-// 05_neon_grid.kage — ネオングリッド。シンセウェイヴ風の透視の床と、山の向こうに沈む太陽。
+// 05_neon_grid.kage - Neon grid. Synthwave perspective floor and a sun setting behind mountains.
 //
-// 設計:
-//   - 画面の下は透視図法の床。マゼンタの縦線と水色の横線の正方形の格子が手前へ流れる。遠くは霧に溶かす。
-//     線の間隔が画素の幅に迫る地平の近くでは、縞（モアレ）にならないよう線を平均の濃さに置き換える。
-//   - 地平の上に、黄から桃色へのグラデーションの太陽。下半分に横の切れ目が入り、切れ目はゆっくり下へ流れる。
-//     太陽の手前に濃い紫の山並み（正弦波の和、稜線はマゼンタに光る）。空は藍から地平近くの赤紫へ、
-//     上の方に小さな星がゆっくり瞬く（Time のハッシュで決める。毎フレーム変わる Random は使わない）。
-//   - 床には太陽の映り込みを縦の淡い帯として置く。
-//   - Beat（拍頭 = 0）で次の 3 つが動く。どれも拍頭で立ち上がって 1 拍の中で引くので、明るさの山は 1 拍に 1 回。
-//       1. 格子の線が光る: 明るさ × (LineBase + LineFlash*exp(-FlashDecay*Beat))。光るのは細い線だけ。
-//       2. 光の波: 拍頭に手前から地平へ走る帯が、通り道の格子の線をさらに明るくする（面は塗らない）。
-//       3. 床の前進: Time*Speed + Surge*(e(Beat) - Beat)（e(b) = 1-(1-b)^3）。拍頭で前へ出て、
-//          拍の変わり目で位置は飛ばない。太陽の後光もわずかに脈打つ。
+// Design:
+//   - Lower half: perspective floor. A square grid of magenta vertical and cyan horizontal lines flows
+//     toward the viewer; distance fades into fog. Near the horizon, where line spacing approaches a pixel,
+//     lines are replaced by their average intensity to avoid moire.
+//   - Above the horizon: a yellow-to-pink gradient sun with horizontal cuts in its lower half that drift down.
+//     Dark purple mountains (sum of sines, magenta-lit ridge) in front of the sun. Sky goes indigo to
+//     red-violet near the horizon, with small stars twinkling up high (from a Time hash; per-frame Random is not used).
+//   - A faint vertical band on the floor reflects the sun.
+//   - Beat (downbeat = 0) drives three things. Each rises at the downbeat and decays within the beat,
+//     so one brightness peak per beat.
+//       1. Grid lines glow: brightness x (LineBase + LineFlash*exp(-FlashDecay*Beat)). Only thin lines glow.
+//       2. Light wave: a band runs from near to the horizon at the downbeat, brightening grid lines on its path
+//          (surfaces are not filled).
+//       3. Floor advance: Time*Speed + Surge*(e(Beat) - Beat) (e(b) = 1-(1-b)^3). Lunges at the downbeat;
+//          no position jump across beats. The sun halo also pulses slightly.
 //
-// 1 画素あたりのループ: なし（0 回）。
+// Per-pixel loops: none (0).
 package main
 
 var Time float
 var Beat float
 var Resolution vec2
 
-// ---- 調整用の値 ------------------------------------------------------------
+// ---- Tuning ----------------------------------------------------------------
 
-// 地平の高さ（画面の中心が 0、上が正。画面の高さを 1 とする）。
+// Horizon height (screen center = 0, up = +, screen height = 1).
 const Horizon = -0.06
 
-// 視点の高さ（床の見え方。小さいほど床が寝る）。
+// Camera height (smaller = flatter floor).
 const CamHeight = 0.32
 
-// 格子の細かさ（床の単位長さあたりの線の数。縦・横とも同じで正方形のマス）。
+// Grid density (lines per floor unit; same both ways, square cells).
 const GridDensity = 2.5
 
-// 霧の濃さ（大きいほど遠くの線が早く消える）。
+// Fog density (larger = far lines vanish sooner).
 const FogDensity = 0.09
 
-// 床が流れる速さと、拍頭の前進の量（180 BPM でも後ろへ戻らないよう Speed > 3*Surge を保つ）。
+// Floor speed and downbeat surge (keep Speed > 3*Surge so motion never reverses at 180 BPM).
 const Speed = 0.9
 const Surge = 0.25
 
-// 格子の線の明るさ（常時）と拍頭の増分、引く速さ。
+// Grid line brightness: constant, downbeat boost, decay rate.
 const LineBase = 0.5
 const LineFlash = 1.1
 const FlashDecay = 5.0
 
-// 光の波の強さと太さ（床の奥行きの単位）、拍の中で届く遠さ。
+// Light wave strength, width (floor depth units), and reach within one beat.
 const WaveGain = 1.6
 const WaveWidth = 0.5
 const WaveReach = 14.0
 
-// 太陽の中心の高さと半径、後光の拍での脈の大きさ。
+// Sun center height, radius, and halo pulse on the beat.
 const SunY = 0.16
 const SunRadius = 0.24
 const HaloPulse = 0.5
 
-// 山並みの高さ（地平から上）。
+// Mountain height (above the horizon).
 const MountainHeight = 0.075
 
-// 星の数の多さ（0〜1、大きいほど多い）。
+// Star amount (0..1, larger = more).
 const StarAmount = 0.06
 
 // ---------------------------------------------------------------------------
 
-// gridLine は座標 x の整数の所に引いた線の濃さ。太さは画面の微分で 1.5 画素ほどに保つ。
-// 線の間隔が画素に迫る所（fw が大きい所）は、縞を出さないよう線の平均の濃さへ移す。
+// gridLine is the intensity of lines at integer x. Width ~1.5 px via screen derivatives.
+// Where spacing approaches a pixel (large fw), fade to the average intensity to avoid moire.
 func gridLine(x float) float {
 	fw := abs(dfdx(x)) + abs(dfdy(x))
 	d := abs(fract(x+0.5) - 0.5)
@@ -77,10 +80,10 @@ func hash21(p vec2) float {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
 }
 
-// mountain は横位置 x での山並みの高さ（地平から上）。
+// mountain is the mountain height (above the horizon) at x.
 func mountain(x float) float {
 	m := 0.55*abs(sin(x*2.1+0.4)) + 0.3*abs(sin(x*5.3+1.7)) + 0.15*abs(sin(x*13.0+2.9))
-	// 太陽の真下は低くして、太陽の切れ目が見えるようにする。
+	// Lower directly under the sun so its cuts stay visible.
 	valley := 0.35 + 0.65*smoothstep(0.1, 0.45, abs(x))
 	return MountainHeight * m * valley
 }
@@ -94,7 +97,7 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	travel := Time*Speed + Surge*(e-b)
 	env := exp(-FlashDecay * b)
 
-	// 床の座標は分岐の外で求める（dfdx を分岐の中で呼ばないため）。地平より上では使わない。
+	// Floor coordinates are computed outside the branch (no dfdx inside branches). Unused above the horizon.
 	dy := max(Horizon-uv.y, 1e-3)
 	zf := CamHeight / dy
 	xw := uv.x * zf
@@ -105,7 +108,7 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 
 	var c vec3
 	if uv.y < Horizon {
-		// 光の波: 拍頭に手前（zf≈1）を出て、拍の終わりに WaveReach まで届く。
+		// Light wave: leaves the near side (zf~=1) at the downbeat, reaches WaveReach by the end of the beat.
 		wz := 1.0 + WaveReach*e
 		wave := exp(-(zf-wz)*(zf-wz)/(WaveWidth*WaveWidth*(1.0+e*4.0))) * (1.0 - b) * (1.0 - b)
 		lineGain := (LineBase + LineFlash*env + WaveGain*wave) * fog
@@ -114,17 +117,17 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		c = floorCol
 		c += vec3(1.0, 0.15, 0.75) * lx * lineGain
 		c += vec3(0.15, 0.85, 1.0) * lz * lineGain
-		// 太陽の映り込み（中央の縦の淡い帯、地平に近いほど濃い）。
+		// Sun reflection (faint central vertical band, stronger near the horizon).
 		refl := exp(-uv.x*uv.x*40.0) * exp(-dy*6.0)
 		c += vec3(1.0, 0.35, 0.45) * refl * 0.22
-		// 地平の近くのもや。
+		// Haze near the horizon.
 		c += vec3(0.6, 0.1, 0.45) * exp(-dy*30.0) * 0.5
 	} else {
 		h := uv.y - Horizon
 		sky := mix(vec3(0.55, 0.08, 0.38), vec3(0.03, 0.01, 0.11), smoothstep(0.0, 0.5, h))
 		c = sky
 
-		// 星。セルごとに 1 個、空の上の方ほど出やすい。瞬きは Time で決める。
+		// Stars: one per cell, more likely higher up. Twinkle from Time.
 		cell := floor(dstPos.xy / 6.0)
 		sr := hash21(cell)
 		if sr < StarAmount*smoothstep(0.15, 0.4, h) {
@@ -133,32 +136,32 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 			c += vec3(0.9, 0.85, 1.0) * (1.0 - smoothstep(0.0, 0.35, length(sp))) * tw * 0.8
 		}
 
-		// 太陽。
+		// Sun.
 		sp := uv - vec2(0.0, SunY)
 		rs := length(sp)
-		sunT := clamp((sp.y+SunRadius)/(2.0*SunRadius), 0.0, 1.0) // 0 が下、1 が上
+		sunT := clamp((sp.y+SunRadius)/(2.0*SunRadius), 0.0, 1.0) // 0 = bottom, 1 = top
 		sunCol := mix(vec3(1.0, 0.15, 0.55), vec3(1.0, 0.9, 0.3), sunT)
 		disk := 1.0 - smoothstep(SunRadius-0.002, SunRadius+0.002, rs)
-		// 下半分の切れ目。下ほど太く、ゆっくり下へ流れる。
+		// Cuts in the lower half: thicker lower down, drifting slowly downward.
 		if sp.y < 0.0 {
-			k := -sp.y / SunRadius // 0〜1
+			k := -sp.y / SunRadius // 0..1
 			band := fract(sp.y*16.0 + Time*0.4)
-			cut := smoothstep(k*0.6-0.03, k*0.6, band) // band が k*0.6 より小さい所を切る
+			cut := smoothstep(k*0.6-0.03, k*0.6, band) // cut where band < k*0.6
 			disk *= cut
 		}
 		c = mix(c, sunCol, disk)
-		// 後光。拍頭でわずかに強くなる。
+		// Halo, slightly stronger at the downbeat.
 		halo := exp(-max(rs-SunRadius, 0.0)*8.0) * (1.0 - disk)
 		c += vec3(1.0, 0.3, 0.5) * halo * (0.16 + 0.1*HaloPulse*env)
 
-		// 山並み。太陽と空の手前に塗り、稜線をマゼンタに光らせる。
+		// Mountains in front of sun and sky, with a magenta-lit ridge.
 		mh := mountain(uv.x)
 		if h < mh {
 			c = mix(vec3(0.07, 0.01, 0.12), vec3(0.16, 0.02, 0.2), h/max(mh, 1e-3))
 		}
 		c += vec3(1.0, 0.25, 0.8) * exp(-abs(h-mh)*Resolution.y*0.35) * 0.7
 
-		// 地平の線。
+		// Horizon line.
 		c += vec3(1.0, 0.4, 0.8) * exp(-h*120.0) * 0.6
 	}
 

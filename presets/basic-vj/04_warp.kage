@@ -1,73 +1,85 @@
 //kage:unit pixels
 
-// 04_warp.kage — ワープ。星の中を手前へ飛ぶ。拍頭ごとにぐっと前へ突っ込む。ビルドアップ用。
+// 04_warp.kage - Warp. Fly forward through stars, lunging ahead on each downbeat. For build-ups.
 //
-// 設計:
-//   - 星は 3 次元に置く。進む軸からの距離 ρ と奥行き Z を持ち、画面上では中心から ρ/Z の所に見える。
-//     手前（Z が小さい）ほど外へ速く流れ、太く明るくなる。手前を過ぎた星は、別の位置で奥に戻る。
-//   - 画面を中心からの角度で LayerCount 枚の層 × SectorCount 本の扇に切り、1 本の扇に星を 1 つ置く。
-//     画素は自分の角度が入る扇の星だけを調べるので、1 層 1 回で済む。層ごとに扇の向きをずらし、継ぎ目を隠す。
-//   - 星は奥行き方向に尾を引く。尾は「少し前の位置」= 奥行き Z〜Z+trail の線分で、画面では中心向きの
-//     放射状の筋になる。同じ trail でも手前の星ほど筋が長い（遠近の動きぼけ）。尾は頭が白、根元が青紫。
-//   - Beat（pump = (1-Beat)^2、拍頭で 1）:
-//       進んだ距離 pos = Time*CruiseSpeed + SurgeAmount*(e(Beat) - Beat)、e(b) = 1-(1-b)^3。
-//       e(b) - b は Beat=0 と 1 でどちらも 0 なので、拍の変わり目で星の位置は飛ばない。拍頭で速く、拍の後半は遅い。
-//       尾の長さ（TrailSurge）・中心の光（CoreGlowSurge）・画角の寄り（FovPunch）を pump で拍頭に強める。
-//       拍頭で尾と画角が一度に変わるのが「突っ込む」手応えで、明るさの変化は拍に 1 回だけ（全画面の明滅はしない）。
-//   - 毎フレーム変わる Random は使わない（全画面のちらつきを作らない）。小節は数えない。
+// Design:
+//   - Stars live in 3D: distance rho from the travel axis and depth Z, shown at rho/Z from the screen center.
+//     Nearer stars (small Z) stream outward faster, thicker and brighter. Stars that pass the near plane
+//     respawn far away at a new position.
+//   - The screen is cut by angle into LayerCount layers x SectorCount sectors, one star per sector.
+//     A pixel checks only the star in its own sector, so one test per layer. Sector angles are offset
+//     per layer to hide seams.
+//   - Stars trail in depth: the trail is the segment Z..Z+trail, i.e. a radial streak toward the center.
+//     For the same trail, nearer stars get longer streaks (perspective motion blur).
+//     Head is white, tail root is blue-violet.
+//   - Beat (pump = (1-Beat)^2, 1 at the downbeat):
+//       Distance traveled pos = Time*CruiseSpeed + SurgeAmount*(e(Beat) - Beat), e(b) = 1-(1-b)^3.
+//       e(b) - b is 0 at both Beat=0 and 1, so star positions do not jump across beats.
+//       Fast at the downbeat, slow later in the beat.
+//       Trail length (TrailSurge), core glow (CoreGlowSurge) and FOV zoom (FovPunch) are boosted by pump.
+//       Trails and FOV change together at the downbeat for the "lunge"; brightness changes once per beat
+//       (no full-screen flashing).
+//   - Per-frame Random is not used (no full-screen flicker). Bars are not counted.
 //
-// 1 画素あたりのループ: LayerCount 回（20 回）。
+// Per-pixel loops: LayerCount (20). Pixels far from a star exit the layer after 1-3 hashes,
+// skipping the remaining hashes and 2 exp calls. Early exits:
+//   - inside the tail root (adds nothing; image unchanged)
+//   - farther than cutK*wd from the star head/tail (adds < GlowCut per color channel; the faint outer glow is cut there)
 package main
 
 var Time float
 var Beat float
 var Resolution vec2
 
-// ---- 調整用の値 ------------------------------------------------------------
-// 色は Fragment の先頭にまとめてある（Kage では大域の var が uniform になるため）。
+// ---- Tuning ----------------------------------------------------------------
+// Colors are at the top of Fragment (global vars become uniforms in Kage).
 
-// 星の層の数（ループの回数）。画面の星の数はおよそ LayerCount*SectorCount。
+// Number of star layers (loop count). Stars on screen ~= LayerCount*SectorCount.
 const LayerCount = 20
 
-// 1 層を角度で切る扇の数。多いほど星が細かく増える。
+// Sectors per layer. More = more, finer stars.
 const SectorCount = 36.0
 
-// 常に進む速さ（奥から手前までを 1 として、1 秒あたり）。
+// Constant forward speed (far-to-near = 1, per second).
 const CruiseSpeed = 0.28
 
-// 拍頭の加速の量。速さは拍頭で CruiseSpeed + 2*SurgeAmount/拍の長さ、拍の終わりで CruiseSpeed - SurgeAmount/拍の長さ。
-// 180 BPM（拍の長さ 1/3 秒）でも後ろへ戻らないよう CruiseSpeed > 3*SurgeAmount を保つ（いまは 0.28 > 0.24）。
+// Downbeat surge. Speed is CruiseSpeed + 2*SurgeAmount/beat at the downbeat, CruiseSpeed - SurgeAmount/beat at the end.
+// Keep CruiseSpeed > 3*SurgeAmount so motion never reverses even at 180 BPM (beat = 1/3 s). Now 0.28 > 0.24.
 const SurgeAmount = 0.08
 
-// 星の奥行きの範囲（見かけの距離）。ZNear で画面の外へ抜け、ZFar で中心の点になる。
-// 星が奥へ戻る瞬間が見えないよう RhoMin/ZNear を画面の対角の半分（約 1.0）より大きく保つ（いまは 2.5）。
+// Star depth range (apparent distance). Stars leave the screen at ZNear and are a center dot at ZFar.
+// Keep RhoMin/ZNear above half the screen diagonal (~1.0) so respawns are never visible. Now 2.5.
 const ZNear = 0.06
 const ZFar = 3.5
 
-// 進む軸からの星の距離 ρ の範囲。
+// Range of star distance rho from the travel axis.
 const RhoMin = 0.15
 const RhoMax = 1.1
 
-// 尾の長さ（奥行き Z の単位）。巡航時の TrailBase に、拍頭で TrailSurge が足される。
+// Trail length (in depth Z). TrailBase while cruising, plus TrailSurge at the downbeat.
 const TrailBase = 0.07
 const TrailSurge = 0.55
 
-// 星の太さ（Z=1 での画面の高さに対する割合）。手前ほど 1/Z で太くなり、StarWidthMax で頭打ち。
+// Star width (fraction of screen height at Z=1). Grows as 1/Z when near, capped at StarWidthMax.
 const StarWidth = 0.0024
 const StarWidthMax = 0.008
 
-// 星全体の明るさの倍率。
+// Overall star brightness multiplier.
 const StarGain = 1.5
 
-// 中心の光（奥の星のかすみ）と、拍頭の強まり。
+// Center glow (haze of far stars) and its downbeat boost.
 const CoreGlow = 0.16
 const CoreGlowSurge = 0.12
 
-// 拍頭の画角の寄り（画面の大きさに対する割合）。拍頭で寄って、拍の中で戻る。
+// Downbeat FOV zoom (fraction of screen size). Zooms in at the downbeat, returns within the beat.
 const FovPunch = 0.035
 
-// 全体の回転の速さ（ラジアン/秒）。
+// Overall roll speed (rad/s).
 const RollSpeed = 0.04
+
+// Brightness below which the faint outer glow is cut (per layer, per color channel, 0..1).
+// About 1/8 of one 8-bit step (1/255). Larger = cheaper, but trims the glow around stars.
+const GlowCut = 0.0005
 
 // ---------------------------------------------------------------------------
 
@@ -80,14 +92,14 @@ func hash21(p vec2) float {
 }
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
-	// 色。頭（白に近い水色）、尾の根元（青紫）、ときどき混ぜる暖色の星、中心の光、背景（濃紺）。
+	// Colors: head (near-white cyan), tail root (blue-violet), occasional warm star, center glow, background (navy).
 	headColor := vec3(0.92, 0.97, 1.0)
 	tailColor := vec3(0.35, 0.22, 1.0)
 	warmColor := vec3(1.0, 0.75, 0.45)
 	coreColor := vec3(0.30, 0.45, 1.0)
 	bgColor := vec3(0.004, 0.006, 0.025)
 
-	// 画面の高さを 1 とした、中心が原点の座標。
+	// Centered coordinates, screen height = 1.
 	px := 1.0 / Resolution.y
 	uv := (dstPos.xy - 0.5*Resolution) * px
 	uv.y = -uv.y
@@ -97,7 +109,7 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	e := 1.0 - (1.0-b)*(1.0-b)*(1.0-b)
 	pos := Time*CruiseSpeed + SurgeAmount*(e-b)
 
-	// 拍頭の寄り（uv を縮めると、星が外へ押し出されて見える）と、ゆっくりした回転。
+	// Downbeat zoom (shrinking uv pushes stars outward) and slow roll.
 	uv *= 1.0 - FovPunch*pump*(1.0-b)
 	ca := cos(Time * RollSpeed)
 	sa := sin(Time * RollSpeed)
@@ -107,43 +119,67 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	a := atan2(uv.y, uv.x)
 	trail := TrailBase + TrailSurge*pump
 
+	// Cutoff distance factor. One layer adds (line+glow)*along*bright*col per color channel;
+	// along, fade, w/wd and col channels are <= 1, bright <= StarGain. For dist >= 2*wd, line <= 0.25*glow, so
+	// added <= 1.25*0.12*StarGain*exp(-dist/(4*wd)). That is below GlowCut when dist > cutK*wd.
+	cutK := max(4.0*log(0.15*StarGain/GlowCut), 2.0)
+
 	c := vec3(0.0)
 	for i := 0; i < LayerCount; i++ {
 		fi := float(i)
-		// 層ごとに扇の向きをずらす。
+		// Offset sector angles per layer.
 		sf := fract(a/tau+hash21(vec2(fi, 1.7))) * SectorCount
 		s := floor(sf)
 		key := vec2(s, fi*7.13)
 
-		// 星ごとに奥行きの位相をずらし、同じ層の星が輪になって来ないようにする。
+		// Offset depth phase per star so stars in one layer do not arrive as a ring.
 		u := hash21(key) - pos
-		z := fract(u)   // 0 が手前、1 が奥
-		gen := floor(u) // 奥へ戻るたびに変わる番号（戻ったら別の星にする）
+		z := fract(u)   // 0 = near, 1 = far
+		Z := ZNear + z*(ZFar-ZNear)
+		// Pixels inside the tail root (r < rt) get nothing from this layer (along below is 0).
+		// rho >= RhoMin, so rt >= RhoMin/(Z+trail). Inside that, skip the rest of this layer (image unchanged).
+		if r < RhoMin/(Z+trail) {
+			continue
+		}
+		w := min(StarWidth/Z, StarWidthMax)
+		wd := max(w, 0.8*px) // lines thinner than 1 px are widened and dimmed
+		// Pixels farther than dmax from the star head/tail add < GlowCut from this layer; skip (see cutK above).
+		// The head is at rho/Z <= RhoMax/Z; beyond that, dist >= r - RhoMax/Z.
+		dmax := cutK * wd
+		if r > RhoMax/Z+dmax {
+			continue
+		}
+
+		gen := floor(u) // changes on each respawn (a respawned star is a new star)
 		k2 := key + gen*vec2(13.17, 3.71)
 		ha := hash21(k2 + 0.5)
-		hr := hash21(k2 + 9.1)
-		hc := hash21(k2 + 4.3)
-
-		Z := ZNear + z*(ZFar-ZNear)
-		rho := RhoMin + (RhoMax-RhoMin)*hr
-		rh := rho / Z           // 頭の画面上の半径
-		rt := rho / (Z + trail) // 尾の根元の画面上の半径
-
-		// 扇の中での星の角度（端に寄せすぎず、隣の扇へはみ出しにくくする）。
+		// Star angle within the sector (not too close to the edge, so it rarely spills into neighbors).
 		da := (sf - s - (0.2 + 0.6*ha)) * (tau / SectorCount)
-		dperp := r * abs(da)
+		dperp := r * abs(da) // perpendicular distance from the streak (lower bound of dist)
+		if dperp > dmax {
+			continue
+		}
 
-		w := min(StarWidth/Z, StarWidthMax)
-		wd := max(w, 0.8*px) // 1 画素より細い線は、幅を広げて明るさを落とす
-		// 頭より外は丸く閉じ、尾の中は根元へ向けて暗くなる。
+		hr := hash21(k2 + 9.1)
+		rho := RhoMin + (RhoMax-RhoMin)*hr
+		rt := rho / (Z + trail) // screen radius of the tail root
+		if r < rt {
+			continue
+		}
+		rh := rho / Z // screen radius of the head
+		// Round cap beyond the head; the trail darkens toward the root.
 		dr := max(r-rh, 0.0)
 		dist := length(vec2(dr, dperp))
+		if dist > dmax {
+			continue
+		}
 		t := clamp((rh-r)/max(rh-rt, 1e-5), 0.0, 1.0)
-		along := (1.0 - t) * (1.0 - t) * step(rt, r)
+		along := (1.0 - t) * (1.0 - t)
+		hc := hash21(k2 + 4.3)
 		line := exp(-(dist*dist)/(wd*wd)) * (w / wd)
 		glow := 0.12 * exp(-dist/(4.0*wd)) * (w / wd)
 
-		// 奥では現れ、手前で消える（奥へ戻る瞬間を見せない）。手前ほど明るい。
+		// Fade in far, fade out near (hide respawns). Nearer = brighter.
 		fade := (1.0 - smoothstep(0.8, 1.0, z)) * smoothstep(0.0, 0.1, z)
 		bright := StarGain * fade * (0.45 + 0.55/(1.0+2.0*Z))
 
@@ -152,7 +188,7 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		c += col * (line + glow) * along * bright
 	}
 
-	// 中心の光（奥の星のかすみ）。拍頭で少し強まる。
+	// Center glow (haze of far stars), slightly stronger at the downbeat.
 	c += coreColor * exp(-r*4.0) * (CoreGlow + CoreGlowSurge*pump)
 	c += bgColor
 

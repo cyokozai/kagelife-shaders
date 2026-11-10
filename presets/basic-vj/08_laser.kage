@@ -1,67 +1,69 @@
 //kage:unit pixels
 
-// 08_laser.kage — レーザー。下から扇形に開くビームが煙の中を振れる。ピーク用。
+// 08_laser.kage - Lasers. Fans of beams from below sweep through smoke. For peaks.
 //
-// 設計:
-//   - 画面の下端のすぐ下に EmitterCount 台の発光点を並べ、各台から BeamsPerEmitter 本のビームを扇形に出す。
-//     扇の向きは台ごとに位相のずれた正弦で左右に振れる（隣どうしで逆向きに振れて、ビームが交差する）。
-//   - 色は台ごとに緑と青紫を交互に。芯が明るいところほど白く飛ぶ。ビームは細い芯と広いにじみで描き、
-//     芯にもにじみにも煙（2 段の値ノイズ）で濃淡を付けて、煙を切り裂く見え方にする。地はほぼ黒の煙。
+// Design:
+//   - EmitterCount emitters sit just below the bottom edge; each fires BeamsPerEmitter beams in a fan.
+//     Fans sweep left/right on phase-shifted sines (neighbors sweep opposite ways, so beams cross).
+//   - Colors alternate green and blue-violet per emitter; bright cores clip toward white. Beams are a thin core
+//     plus a wide haze, both modulated by smoke (two octaves of value noise) so they look like they cut through it.
+//     Background is near-black smoke.
 //   - Beat:
-//       1. 拍頭で扇が開き（隣のビームとの角度 SpreadBase + SpreadKick*env）、拍の終わりに閉じる。
-//       2. 拍頭で全台が光る（BeamBase + BeamFlash*env, env = exp(-FlashDecay*Beat)）。
-//       3. その上に小さな連鎖を重ねる。内側の 2 台は拍頭、外側の台ほど遅れて（端の台で約 ChaseLag 拍）
-//          ChaseFlash だけ光り足す（中央から外へ広がる）。連鎖を主にすると拍頭ではまだ外側が光っておらず、
-//          明るさの山が拍頭の後ろへずれた（初版で確かめた）ので、主の光は全台同時にしてある。
-//       4. 下端の光だまりも同じ強さで脈打つ。
-//     光るのは細いビームなので、画面全体の平均輝度の振れは小さい。明滅は 1 拍に 1 回（Beat の位相だけで決まり、
-//     Random は使わない）。
+//       1. Fans open at the downbeat (angle between beams SpreadBase + SpreadKick*env) and close by the end.
+//       2. All emitters flash at the downbeat (BeamBase + BeamFlash*env, env = exp(-FlashDecay*Beat)).
+//       3. A small chase on top: the inner 2 emitters at the downbeat, outer ones later (edge ~ChaseLag beats),
+//          each adding ChaseFlash (spreads center -> out). With the chase as the main flash, the outer emitters
+//          were still dark at the downbeat and the brightness peak lagged behind it (checked in the first version),
+//          so the main flash is simultaneous on all emitters.
+//       4. The glow pool at the bottom pulses with the same strength.
+//     Only thin beams glow, so the full-screen average brightness swing is small. One flash per beat
+//     (depends only on the Beat phase; Random is not used).
 //
-// 1 画素あたりのループ: 外側 EmitterCount 回、内側の合計 EmitterCount × BeamsPerEmitter 回（8 × 3 = 24 回）。
-// 三角関数は台ごとに 2 組だけ（扇のビームは回転の掛け算で並べる）。
+// Per-pixel loops: outer EmitterCount, inner total EmitterCount x BeamsPerEmitter (8 x 3 = 24).
+// Only 2 trig pairs per emitter (fan beams are stepped by a rotation multiply).
 package main
 
 var Time float
 var Beat float
 var Resolution vec2
 
-// ---- 調整用の値 ------------------------------------------------------------
+// ---- Tuning ----------------------------------------------------------------
 
-// 発光点の数と、1 台あたりのビームの数（掛けたものが内側のループの回数）。
+// Number of emitters and beams per emitter (product = inner loop count).
 const EmitterCount = 8
 const BeamsPerEmitter = 3
 
-// 発光点を並べる幅（画面の幅に対する割合）。
+// Emitter row width (fraction of screen width).
 const EmitterSpan = 0.84
 
-// 扇の広がり（隣のビームとの角度, ラジアン）の常時の値と拍頭の増分。
+// Fan spread (angle between adjacent beams, rad): constant and downbeat boost.
 const SpreadBase = 0.09
 const SpreadKick = 0.17
 
-// 左右の振れの大きさ（ラジアン）と速さ（ラジアン毎秒）。
+// Sweep amplitude (rad) and speed (rad/s).
 const SweepAmount = 0.5
 const SweepSpeed = 0.75
 
-// ビームの芯の太さとにじみの幅（画面の高さに対する割合）。
+// Beam core width and haze width (fraction of screen height).
 const CoreWidth = 0.0025
 const HazeWidth = 0.03
 
-// にじみの強さ。
+// Haze strength.
 const HazeGain = 0.2
 
-// ビームが上へ行くほど弱まる速さ（画面の高さ 1 あたり）。
+// Beam falloff going up (per screen height).
 const BeamFalloff = 0.65
 
-// ビームの明るさの常時の値と拍頭の増分、引く速さ（拍あたり）。
+// Beam brightness: constant, downbeat boost, decay rate (per beat).
 const BeamBase = 0.45
 const BeamFlash = 0.7
 const FlashDecay = 5.0
 
-// 連鎖の光り足しの強さと、内側の台から端の台までの遅れ（拍）。
+// Chase flash strength and delay from inner to edge emitters (beats).
 const ChaseFlash = 0.35
 const ChaseLag = 0.12
 
-// 芯が白く飛び始める明るさ。
+// Brightness where cores start clipping to white.
 const WhiteHot = 0.6
 
 // ---------------------------------------------------------------------------
@@ -83,25 +85,25 @@ func noise2(p vec2) float {
 	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
 }
 
-// rot は v を角 (cs.x = cos, cs.y = sin) だけ反時計回りに回す。
+// rot rotates v counterclockwise by the angle (cs.x = cos, cs.y = sin).
 func rot(v vec2, cs vec2) vec2 {
 	return vec2(v.x*cs.x-v.y*cs.y, v.x*cs.y+v.y*cs.x)
 }
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
-	// 画面の中心を原点、高さを 1、上を +y にした座標。
+	// Centered coordinates, height = 1, up = +y.
 	uv := (dstPos.xy - 0.5*Resolution) / Resolution.y
 	uv.y = -uv.y
 	aspect := Resolution.x / Resolution.y
 
-	// 扇の開き。拍頭で最大、拍の中で閉じていく。
+	// Fan opening. Max at the downbeat, closing within the beat.
 	beat := fract(Beat)
 	env := exp(-FlashDecay * beat)
 	spread := SpreadBase + SpreadKick*env
 	turn := vec2(cos(spread), sin(spread))
 	half := 0.5 * float(BeamsPerEmitter-1) * spread
 
-	// 煙（ゆっくり流れる 2 段の値ノイズ, 0.35〜1.25 程度）。
+	// Smoke (slow two-octave value noise, ~0.35..1.25).
 	smoke := 0.55*noise2(uv*3.0+vec2(Time*0.08, -Time*0.05)) + 0.45*noise2(uv*7.0-vec2(0.0, Time*0.15))
 	smoke = 0.35 + 0.9*smoke
 
@@ -114,14 +116,14 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 		odd := mod(fi, 2.0)
 		sgn := 1.0 - 2.0*odd
 
-		// 中央から外への連鎖。拍頭からの経過を台ごとに遅らせ（内側の 2 台は遅れ 0）、負なら前の拍の尾として扱う。
+		// Center-out chase. Delay time since the downbeat per emitter (inner 2: no delay); negative = previous beat's tail.
 		local := beat - ChaseLag*max(abs(side)*2.0-1.0/(ne-1.0), 0.0)
 		local += 1.0 - step(0.0, local)
 		gain := BeamBase + BeamFlash*env + ChaseFlash*exp(-FlashDecay*local)
 
 		col := mix(vec3(0.1, 1.0, 0.3), vec3(0.5, 0.25, 1.0), odd)
 
-		// 扇の端のビームの向き。中央のビームから -half だけ回したところから始める。
+		// Direction of the fan's edge beam: start at -half from the center beam.
 		base := 1.5708 + sgn*SweepAmount*sin(Time*SweepSpeed+fi*0.7) - half
 		dir := vec2(cos(base), sin(base))
 		v := uv - o
@@ -138,14 +140,14 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 			dir = rot(dir, turn)
 		}
 		acc *= gain
-		// 明るい芯ほど白く飛ばす。
+		// Brighter cores clip toward white.
 		c += col*acc + vec3(1.0)*max(acc-WhiteHot, 0.0)*0.6
 
-		// 発光点の光だまり（同じ包絡で脈打つ）。
+		// Emitter glow pool (pulses with the same envelope).
 		c += col * 0.06 * gain * exp(-length(v)*10.0)
 	}
 
-	// 地: 暗い青紫の煙。
+	// Background: dark blue-violet smoke.
 	c += vec3(0.008, 0.006, 0.018) * smoke
 
 	return vec4(c, 1.0)
