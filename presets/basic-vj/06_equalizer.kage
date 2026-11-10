@@ -1,69 +1,71 @@
 //kage:unit pixels
 
-// 06_equalizer.kage — イコライザ。LED の棒グラフが拍頭で跳ね上がり、拍の終わりへ向けて落ちる。
+// 06_equalizer.kage - Equalizer. LED bars jump at the downbeat and fall toward the end of the beat.
 //
-// 設計:
-//   - 画面の幅を BarCount 本の棒に分け、各棒を LED の段に刻む。色は下から緑・黄・赤。点いていない段も
-//     ごく暗く見せる。床の下には反射を薄く置く。地は炭色。拍頭の直後だけ、点いた段のまわりに淡いにじみを足す。
-//   - 音の入力は無いので、棒の高さは疑似の値で作る。
-//       1. 拍ごとの種（beatSeed）: kagelife は拍の位相 Beat（0〜1）しか渡さず、拍の番号は来ない。そこで
-//          「いまの拍が始まった時刻」を Time - Beat*BeatGuess で見積もり、それを BeatGuess で割って floor する。
-//          実際の拍の長さが BeatGuess と等しければ、この値は拍の中で一定で、拍の境目でちょうど 1 増える。
-//          限界: 実際の拍の長さ T が BeatGuess とずれると、値は拍の中で (T/BeatGuess - 1) だけ流れるので、
-//          およそ |T/BeatGuess - 1| の割合の拍で、拍の途中に種が 1 回変わり、高さが途中で切り替わる
-//          （BeatGuess=0.5 秒=120 BPM に対し、128 BPM なら約 6%、90 BPM なら約 33% の拍）。
-//          タップしていない間は kagelife の既定の BPM（internal/tempo/tapper.go の DefaultBPM = 120）で
-//          Beat が回るので、BeatGuess と一致し、拍の途中での切り替わりは起きない。
-//       2. 拍頭の高さ（peak）: 棒の番号と種から作る。4 本ずつの粗い値ノイズ（隣の棒と形がつながり、
-//          スペクトルらしい山になる）に、棒ごとの細かいばらつきを足す。左（低音）ほど高く、右ほど低い。
-//       3. 拍の包絡: rest + (1-rest)*exp(-JumpDecay*Beat)。拍頭で peak まで跳ね、拍の終わりへ落ちる。
-//          rest は左（低音）ほど小さく、低音の棒ほど大きく跳ねる。
-//       4. 揺れ: Time に対してなめらかな値ノイズを少しだけ足し、拍の途中でも棒が止まって見えないようにする。
-//     棒の上には白いピークの印を置く。拍頭に peak の位置から始まり、重力のように加速して落ち、棒に追いつく。
-//   - 明るさ: 全画面を一様に光らせる処理は入れない。拍頭で点く段が増えるぶん、画面の平均の明るさは
-//     1 拍に 1 回だけ上がって下がる。毎フレーム変わる Random は使わない。
+// Design:
+//   - The width is split into BarCount bars, each cut into LED segments. Green, yellow, red from the bottom.
+//     Unlit segments stay faintly visible. A faint reflection sits below the floor on a charcoal background.
+//     Just after the downbeat, a soft glow is added around lit segments.
+//   - There is no audio input, so bar heights are synthetic.
+//       1. Per-beat seed (beatSeed): kagelife passes only the beat phase Beat (0..1), not a beat number.
+//          So the start time of the current beat is estimated as Time - Beat*BeatGuess, divided by BeatGuess, floored.
+//          If the real beat length equals BeatGuess, this is constant within a beat and steps by 1 at each beat.
+//          Limit: if the real beat length T differs from BeatGuess, the value drifts by (T/BeatGuess - 1) per beat,
+//          so in about |T/BeatGuess - 1| of beats the seed changes once mid-beat and heights switch mid-beat
+//          (with BeatGuess=0.5 s=120 BPM: ~6% of beats at 128 BPM, ~33% at 90 BPM).
+//          Without tapping, kagelife runs Beat at its default BPM (DefaultBPM = 120 in internal/tempo/tapper.go),
+//          which matches BeatGuess, so no mid-beat switches occur.
+//       2. Downbeat height (peak): from bar index and seed. Coarse value noise every 4 bars (neighbors connect into
+//          spectrum-like hills) plus fine per-bar variation. Higher on the left (bass), lower on the right.
+//       3. Beat envelope: rest + (1-rest)*exp(-JumpDecay*Beat). Jumps to peak at the downbeat, falls toward the end.
+//          rest is smaller on the left (bass), so bass bars jump more.
+//       4. Wobble: a little smooth value noise over Time so bars never look frozen mid-beat.
+//     A white peak marker sits above each bar. It starts at peak on the downbeat, falls with gravity-like
+//     acceleration, and catches up with the bar.
+//   - Brightness: no uniform full-screen flash. More segments light at the downbeat, so the average screen
+//     brightness rises and falls once per beat. Per-frame Random is not used.
 //
-// 1 画素あたりのループ: なし（画素から棒と段の番号を直接求める）。
+// Per-pixel loops: none (bar and segment indices come directly from the pixel).
 package main
 
 var Time float
 var Beat float
 var Resolution vec2
 
-// ---- 調整用の値 ------------------------------------------------------------
+// ---- Tuning ----------------------------------------------------------------
 
-// 棒の数。
+// Number of bars.
 const BarCount = 32.0
 
-// LED の段の数（棒の最大の高さあたり）。
+// LED segments per max bar height.
 const SegmentCount = 24.0
 
-// 床の高さ（画面の下からの割合）と、棒の最大の高さ（画面の高さに対する割合）。
+// Floor height (fraction from the bottom) and max bar height (fraction of screen height).
 const FloorY = 0.17
 const MaxHeight = 0.74
 
-// 拍の種を作るときに仮定する 1 拍の長さ（秒）。0.5 = 120 BPM。
+// Assumed beat length for the seed (s). 0.5 = 120 BPM.
 const BeatGuess = 0.5
 
-// 拍の終わりに残る高さの割合。左端（低音）と右端（高音）の値。
+// Fraction of height left at the end of the beat: left (bass) and right (treble).
 const RestBass = 0.18
 const RestTreble = 0.5
 
-// 拍頭から落ちる速さ。
+// Fall rate after the downbeat.
 const JumpDecay = 3.2
 
-// 揺れの大きさ（最大の高さに対する割合）と、揺れの速さ（1 秒あたりの格子の数）。
+// Wobble size (fraction of max height) and rate (grid cells per second).
 const Wobble = 0.07
 const WobbleRate = 6.0
 
-// ピークの印が落ちる速さ（拍の位相の 2 乗あたり、最大の高さに対する割合）。
+// Peak marker fall rate (per beat phase squared, fraction of max height).
 const CapFall = 1.6
 
-// 点いていない段と点いている段の明るさ。
+// Brightness of unlit and lit segments.
 const UnlitLevel = 0.06
 const LitLevel = 0.85
 
-// 拍頭のにじみの強さと、拍頭から消える速さ。
+// Downbeat glow strength and its decay rate.
 const GlowLevel = 0.35
 const GlowDecay = 7.0
 
@@ -75,14 +77,14 @@ func hash21(p vec2) float {
 	return fract((q.x + q.y) * q.z)
 }
 
-// beatSeed は拍ごとに 1 ずつ増える値（見積もり。限界は冒頭のコメント）。
+// beatSeed increases by 1 per beat (estimate; limits are in the header).
 func beatSeed() float {
 	return floor((Time - Beat*BeatGuess) / BeatGuess)
 }
 
-// peakHeight は棒 bar の拍頭の高さ（0〜1）。種 seed が同じ間は一定。
+// peakHeight is the downbeat height of bar (0..1). Constant while seed is unchanged.
 func peakHeight(bar, seed float) float {
-	// 4 本ずつの粗い値ノイズ（隣の棒と形がつながる）。
+	// Coarse value noise every 4 bars (connects with neighbors).
 	g := bar / 4.0
 	gi := floor(g)
 	gf := fract(g)
@@ -90,12 +92,12 @@ func peakHeight(bar, seed float) float {
 	coarse := mix(hash21(vec2(gi, seed)), hash21(vec2(gi+1.0, seed)), gu)
 	fine := hash21(vec2(bar+57.0, seed*1.37))
 	n := 0.7*coarse + 0.3*fine
-	// 左（低音）ほど高い。左寄りの山は赤の段まで届くことがある。
+	// Higher on the left (bass). Left-side peaks can reach the red segments.
 	tilt := 1.12 - 0.45*bar/BarCount
 	return clamp((0.25+0.85*n)*tilt, 0.12, 1.0)
 }
 
-// wobble は Time に対してなめらかな -1〜1 の揺れ。
+// wobble is a smooth -1..1 wobble over Time.
 func wobble(bar float) float {
 	t := Time*WobbleRate + bar*0.61
 	i := floor(t)
@@ -106,12 +108,12 @@ func wobble(bar float) float {
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	x01 := dstPos.x / Resolution.x
-	y01 := 1.0 - dstPos.y/Resolution.y // 下が 0
+	y01 := 1.0 - dstPos.y/Resolution.y // bottom = 0
 
 	bg := mix(vec3(0.045, 0.045, 0.055), vec3(0.015, 0.015, 0.02), y01)
 	c := bg
 
-	// 左右に少し余白を取る。
+	// Small side margins.
 	xm := (x01 - 0.04) / 0.92
 	if xm < 0.0 || xm >= 1.0 {
 		return vec4(c, 1.0)
@@ -127,10 +129,10 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	env := exp(-JumpDecay * Beat)
 	h := clamp(pk*(rest+(1.0-rest)*env)+Wobble*wobble(bar)*(0.4+0.6*treble), 0.03, 1.0)
 
-	// ピークの印: 拍頭に peak の位置から落ち始め、棒に追いつく。
+	// Peak marker: starts falling from peak at the downbeat, catches up with the bar.
 	capH := max(pk-CapFall*Beat*Beat, h)
 
-	// 床の上: y は 0（床）〜1（最大の高さ）。床の下は反射として上下を返す。
+	// Above the floor: y is 0 (floor) .. 1 (max height). Below the floor, flip as a reflection.
 	mirrored := 0.0
 	y := (y01 - FloorY) / MaxHeight
 	if y < 0.0 {
@@ -147,16 +149,16 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	ledCol := mix(vec3(0.1, 1.0, 0.3), vec3(1.0, 0.85, 0.1), smoothstep(0.45, 0.65, level))
 	ledCol = mix(ledCol, vec3(1.0, 0.15, 0.1), smoothstep(0.78, 0.9, level))
 
-	// 段は、その段の中心が棒の高さより下なら点く。
+	// A segment lights if its center is below the bar height.
 	lit := step(level, h)
 	led := ledCol * mix(UnlitLevel, LitLevel, lit) * inSeg * inBar * inRange
 
-	// ピークの印（capH を含む段）。点いた段とは重ねない。
+	// Peak marker (segment containing capH). Not drawn over lit segments.
 	capSeg := min(floor(capH*SegmentCount), SegmentCount-1.0)
 	capMark := (1.0 - step(0.5, abs(seg-capSeg))) * inSeg * inBar * (1.0 - lit) * inRange
 	led += vec3(0.92, 0.92, 1.0) * capMark * 0.85
 
-	// 拍頭のにじみ: 点いた範囲のまわりを、棒の中心からの距離で淡く光らせる。
+	// Downbeat glow: soft light around the lit range, by distance from the bar center.
 	dx := abs(local - 0.5)
 	glow := GlowLevel * exp(-GlowDecay*Beat) * exp(-dx*dx*18.0) * step(y, h+0.03) * inRange
 	led += ledCol * glow * 0.5
